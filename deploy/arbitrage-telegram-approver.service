@@ -1,0 +1,15 @@
+[Unit]
+Description=eBay Arbitrage — Telegram Fulfillment Approver
+After=network.target arbitrage-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/arbitrage-api
+ExecStart=/root/arbitrage-api/.venv/bin/python telegram_approver.py
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/root/arbitrage-api/.env
+
+[Install]
+WantedBy=multi-user.target

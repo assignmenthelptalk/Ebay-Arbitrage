@@ -110,6 +110,33 @@ td { padding: 9px 14px; vertical-align: middle; }
   border-radius: 6px; padding: 8px 14px; color: var(--red);
   font-size: 12px; margin-bottom: 16px; display: none;
 }
+
+.appr-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--yellow); border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 10px;
+}
+.appr-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.appr-id { font-family: 'SF Mono', ui-monospace, monospace; font-size: 13px; }
+.appr-price { font-family: 'SF Mono', ui-monospace, monospace; font-size: 20px; text-align: right; }
+.appr-price small { color: var(--muted); font-size: 10px; display: block; font-weight: 400; }
+.appr-meta { color: var(--muted); font-size: 12px; margin: 4px 0 12px; font-family: 'SF Mono', ui-monospace, monospace; }
+.appr-controls { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+.appr-amt {
+  flex: 1; min-width: 140px; display: flex; align-items: center; gap: 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0 10px;
+}
+.appr-amt span { color: var(--muted); font-family: 'SF Mono', ui-monospace, monospace; font-size: 12px; }
+.appr-amt input {
+  background: transparent; border: 0; outline: 0; color: var(--text);
+  font-family: 'SF Mono', ui-monospace, monospace; font-size: 14px; width: 100%; padding: 8px 0;
+}
+.appr-btn.go { background: #1a4731; border-color: #2ea043; color: #7ee787; }
+.appr-btn.stop { background: transparent; color: var(--red); border: 1px solid var(--red); }
+.appr-msg { font-family: 'SF Mono', ui-monospace, monospace; font-size: 12px; margin-top: 8px; }
+.appr-msg.ok { color: var(--green); }
+.appr-msg.err { color: var(--red); }
 </style>
 </head>
 <body>
@@ -149,6 +176,14 @@ td { padding: 9px 14px; vertical-align: middle; }
     <button class="btn btn-blue" onclick="doOpportunities(this)">Get Opportunities</button>
   </div>
   <pre class="result-box" id="result-box"></pre>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Pending Approvals</span>
+      <span class="pill" id="c-approvals">—</span>
+    </div>
+    <div id="approvals-list"></div>
+  </div>
 
   <div class="section">
     <div class="section-head">
@@ -270,6 +305,89 @@ async function apiFetch(url, opts) {
   return r.json();
 }
 
+function money(n) {
+  return '$' + Number(n ?? 0).toFixed(2);
+}
+
+// Dedicated POST helper for the approve/reject endpoints: unlike apiFetch(),
+// this extracts the gate's `detail` message (e.g. a 422 cap-exceeded reason)
+// so it can be shown on the card instead of a generic "HTTP 422".
+async function approvalPost(path, body) {
+  const headers = { 'Content-Type': 'application/json', 'X-API-Key': getApiKey() };
+  const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 403) localStorage.removeItem('apiKey');
+  if (!r.ok) {
+    throw new Error(typeof data.detail === 'string' ? data.detail : (r.statusText || `HTTP ${r.status}`));
+  }
+  return data;
+}
+
+function renderApprovalCard(job) {
+  const price = Number(job.amazon_price ?? 0);
+  const suggested = (price * 1.10).toFixed(2);
+  const margin = job.meta && job.meta.margin != null ? job.meta.margin : '—';
+
+  const card = document.createElement('div');
+  card.className = 'appr-card';
+  card.innerHTML = `
+    <div class="appr-top">
+      <div class="appr-id">Order <b>${esc(job.order_id)}</b></div>
+      <div class="appr-price">${money(price)}<small>Amazon price on file</small></div>
+    </div>
+    <div class="appr-meta">margin: ${esc(String(margin))}</div>
+    <div class="appr-controls">
+      <label class="appr-amt">
+        <span>≤ $</span>
+        <input type="number" step="0.01" min="0" value="${esc(suggested)}" aria-label="Max price to approve">
+      </label>
+      <button class="btn appr-btn go">Approve</button>
+      <button class="btn appr-btn stop">Reject</button>
+    </div>
+    <div class="appr-msg"></div>`;
+
+  const input = card.querySelector('input');
+  const [goBtn, stopBtn] = card.querySelectorAll('button');
+  const msg = card.querySelector('.appr-msg');
+  const setMsg = (t, cls) => { msg.textContent = t; msg.className = 'appr-msg ' + cls; };
+  const lock = () => { goBtn.disabled = stopBtn.disabled = true; };
+  const unlock = () => { goBtn.disabled = stopBtn.disabled = false; };
+
+  goBtn.onclick = async () => {
+    lock();
+    try {
+      await approvalPost(`/orders/${encodeURIComponent(job.order_id)}/approve-fulfillment`,
+        { confirmed_max_price: Number(input.value), approver: 'dashboard' });
+      setMsg(`Approved up to ${money(input.value)}. Bot buys only at or under that.`, 'ok');
+      setTimeout(loadApprovals, 1200);
+    } catch (e) { setMsg(e.message, 'err'); unlock(); }
+  };
+
+  stopBtn.onclick = async () => {
+    lock();
+    try {
+      await approvalPost(`/orders/${encodeURIComponent(job.order_id)}/reject-fulfillment`,
+        { reason: 'rejected from dashboard', approver: 'dashboard' });
+      setMsg('Rejected. Bot will not buy this.', 'ok');
+      setTimeout(loadApprovals, 1200);
+    } catch (e) { setMsg(e.message, 'err'); unlock(); }
+  };
+
+  return card;
+}
+
+async function loadApprovals() {
+  const jobs = await apiFetch('/fulfillment/pending');
+  document.getElementById('c-approvals').textContent = jobs.length;
+  const list = document.getElementById('approvals-list');
+  list.innerHTML = '';
+  if (!jobs.length) {
+    list.innerHTML = '<div class="empty">Nothing waiting. New orders will appear here for you to approve.</div>';
+    return;
+  }
+  for (const job of jobs) list.appendChild(renderApprovalCard(job));
+}
+
 async function loadStats() {
   const d = await apiFetch('/log/summary');
   const ev = d.events || {}, tot = d.totals || {};
@@ -342,7 +460,7 @@ async function loadEvents() {
 
 async function refresh() {
   document.getElementById('dot').className = 'dot stale';
-  const results = await Promise.allSettled([loadStats(), loadListings(), loadOrders(), loadEvents()]);
+  const results = await Promise.allSettled([loadStats(), loadApprovals(), loadListings(), loadOrders(), loadEvents()]);
   const errs = results.filter(r => r.status === 'rejected').map(r => r.reason?.message);
   if (errs.length) showErr('Load error: ' + errs.join(' | '));
   document.getElementById('dot').className = 'dot';

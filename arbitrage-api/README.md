@@ -375,6 +375,39 @@ have to match on both sides — they share `fulfillment_queue.json` directly via
 a file lock, not over HTTP, so a mismatched path means the bot and the API are
 silently looking at two different queues.
 
+## Telegram Approver Service
+
+`telegram_approver.py` (in this directory, next to `main.py` and
+`fulfillment_gate.py`) pushes each `pending_review` order to a Telegram chat
+with Approve/Reject buttons, so you don't need to hand-craft `curl` calls to
+approve a purchase. It talks to `fulfillment_gate.py` directly (same shared
+`fulfillment_queue.json`, file-locked) — it does **not** use `API_KEYS` /
+`X-API-Key` at all.
+
+Add to `/root/arbitrage-api/.env` (not committed):
+```
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+TELEGRAM_CHAT_ID=<chat to notify, usually your own user id>
+TELEGRAM_ALLOWED_IDS=<comma-separated Telegram user ids allowed to approve/reject>
+APPROVAL_BUFFER_PCT=0.10
+POLL_INTERVAL=30
+```
+
+The service **refuses to start** if `TELEGRAM_ALLOWED_IDS` is empty, and only
+those user IDs can act on any button/command — everyone else is ignored.
+
+Install and enable [`deploy/arbitrage-telegram-approver.service`](../deploy/arbitrage-telegram-approver.service):
+```bash
+cp deploy/arbitrage-telegram-approver.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable arbitrage-telegram-approver
+systemctl start arbitrage-telegram-approver
+systemctl status arbitrage-telegram-approver
+
+# Live logs
+journalctl -u arbitrage-telegram-approver -f
+```
+
 ## Cron: Poll pending orders every 15 minutes
 
 ```bash
