@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arbitrage Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; }
+
+.header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 24px; display: flex; align-items: center;
+  justify-content: space-between; position: sticky; top: 0; z-index: 10;
+}
+.header-title { font-size: 15px; font-weight: 600; }
+.header-title span { color: var(--muted); font-weight: 400; }
+.refresh-info { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.dot.stale { background: var(--yellow); }
+.progress-track { width: 60px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--blue); border-radius: 2px; transition: width 1s linear; }
+
+.stats-bar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+.stat { background: var(--surface); padding: 18px 24px; }
+.stat-label { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px; }
+.stat-value { font-size: 28px; font-weight: 700; line-height: 1; }
+.stat-sub { color: var(--muted); font-size: 11px; margin-top: 5px; }
+
+main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+.actions { display: flex; gap: 10px; margin-bottom: 18px; }
+.btn {
+  padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text); cursor: pointer;
+  font-size: 13px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { background: #2d333b; border-color: var(--muted); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-green { background: #1a4731; border-color: #2ea043; color: #7ee787; }
+.btn-green:hover { background: #1e5738; }
+.btn-blue { background: #1a2d4a; border-color: #1f6feb; color: #79c0ff; }
+.btn-blue:hover { background: #1d3d6b; }
+.spinner { width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.5s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.result-box {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 18px;
+  font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px;
+  white-space: pre-wrap; max-height: 220px; overflow-y: auto;
+  color: var(--muted); display: none;
+}
+.result-box.show { display: block; }
+
+.section { margin-bottom: 28px; }
+.section-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.section-title { font-size: 14px; font-weight: 600; }
+.pill { background: var(--surface2); color: var(--muted); border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
+
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; padding: 9px 14px;
+  text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+tbody tr { border-bottom: 1px solid var(--border); }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: rgba(255,255,255,0.025); }
+td { padding: 9px 14px; vertical-align: middle; }
+.mono { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+.muted { color: var(--muted); }
+.clip { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { padding: 32px 14px; text-align: center; color: var(--muted); }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+.b-active    { background: rgba(63,185,80,.15);   color: #3fb950; }
+.b-paused    { background: rgba(210,153,34,.15);  color: #d29922; }
+.b-deleted   { background: rgba(139,148,158,.12); color: #8b949e; }
+.b-pending   { background: rgba(88,166,255,.15);  color: #58a6ff; }
+.b-fulfilled { background: rgba(63,185,80,.15);   color: #3fb950; }
+.b-failed    { background: rgba(248,81,73,.15);   color: #f85149; }
+.b-triggered { background: rgba(188,140,255,.15); color: #bc8cff; }
+.b-sale      { background: rgba(63,185,80,.15);   color: #3fb950; }
+.b-ban       { background: rgba(248,81,73,.15);   color: #f85149; }
+.b-error     { background: rgba(248,81,73,.12);   color: #f85149; }
+.b-info      { background: rgba(139,148,158,.12); color: #8b949e; }
+
+.mg-good { color: #3fb950; }
+.mg-ok   { color: #d29922; }
+.mg-bad  { color: #f85149; }
+
+.err-banner {
+  background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.3);
+  border-radius: 6px; padding: 8px 14px; color: var(--red);
+  font-size: 12px; margin-bottom: 16px; display: none;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">eBay Arbitrage <span>/ Dashboard</span></div>
+  <div class="refresh-info">
+    <div class="dot" id="dot"></div>
+    <span>Refreshing in <b id="secs">60</b>s</span>
+    <div class="progress-track"><div class="progress-fill" id="pbar"></div></div>
+  </div>
+</div>
+
+<div class="stats-bar">
+  <div class="stat">
+    <div class="stat-label">Active Listings</div>
+    <div class="stat-value" id="s-listings">—</div>
+    <div class="stat-sub" id="s-listings-sub">&nbsp;</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Sales (7 days)</div>
+    <div class="stat-value" id="s-sales">—</div>
+    <div class="stat-sub" id="s-sales-sub">&nbsp;</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Fulfillment Rate</div>
+    <div class="stat-value" id="s-rate">—</div>
+    <div class="stat-sub" id="s-rate-sub">&nbsp;</div>
+  </div>
+</div>
+
+<main>
+  <div class="err-banner" id="err"></div>
+
+  <div class="actions">
+    <button class="btn btn-green" onclick="doScan(this)">Scan Competitors</button>
+    <button class="btn btn-blue" onclick="doOpportunities(this)">Get Opportunities</button>
+  </div>
+  <pre class="result-box" id="result-box"></pre>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Listings</span>
+      <span class="pill" id="c-listings">—</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Title</th><th>ASIN</th><th>eBay Price</th>
+          <th>Amazon Cost</th><th>Margin</th><th>Status</th>
+        </tr></thead>
+        <tbody id="t-listings"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Pending Orders</span>
+      <span class="pill" id="c-orders">—</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Order ID</th><th>Buyer</th><th>Item</th>
+          <th>ASIN</th><th>Sale Price</th><th>Status</th><th>Created</th>
+        </tr></thead>
+        <tbody id="t-orders"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Recent Events</span>
+      <span class="pill" id="c-events">—</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Type</th><th>Reference</th><th>Detail</th>
+        </tr></thead>
+        <tbody id="t-events"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+const INTERVAL = 60;
+let _tick, _timer, _left = INTERVAL;
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+      .toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  } catch { return String(iso); }
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+      .toLocaleDateString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  } catch { return String(iso); }
+}
+
+function badge(status) {
+  const s = String(status ?? 'unknown').toLowerCase();
+  const map = {
+    active:'active', paused:'paused', deleted:'deleted',
+    pending:'pending', fulfilled:'fulfilled', failed:'failed',
+    fulfillment_triggered:'triggered',
+    sale:'sale', ban:'ban',
+    fulfillment_error:'error', api_error:'error',
+    listing_created:'info', listing_paused:'info', listing_deleted:'info',
+    impression:'info', margin_scan:'info', price_break:'info',
+  };
+  return `<span class="badge b-${map[s] || 'info'}">${esc(status ?? 'unknown')}</span>`;
+}
+
+function mgClass(pct) {
+  if (pct == null) return '';
+  return pct >= 15 ? 'mg-good' : pct >= 5 ? 'mg-ok' : 'mg-bad';
+}
+
+function showErr(msg) {
+  const el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(showErr._t);
+  showErr._t = setTimeout(() => el.style.display = 'none', 8000);
+}
+
+async function apiFetch(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(`${r.status}: ${t.slice(0,100)}`); }
+  return r.json();
+}
+
+async function loadStats() {
+  const d = await apiFetch('/log/summary');
+  const ev = d.events || {}, tot = d.totals || {};
+  document.getElementById('s-listings').textContent = tot.active_listings ?? 0;
+  document.getElementById('s-listings-sub').textContent = `${tot.total_listings ?? 0} total`;
+  document.getElementById('s-sales').textContent = ev.sale ?? 0;
+  document.getElementById('s-sales-sub').textContent = `${ev.fulfillment_triggered ?? 0} triggered`;
+  const ok = ev.sale ?? 0, bad = ev.fulfillment_error ?? 0, total = ok + bad;
+  document.getElementById('s-rate').textContent = total ? Math.round(ok / total * 100) + '%' : '—';
+  document.getElementById('s-rate-sub').textContent = total ? `${ok} ok · ${bad} errors` : 'no attempts yet';
+}
+
+async function loadListings() {
+  const d = await apiFetch('/listings?limit=100');
+  const rows = d.listings || [];
+  document.getElementById('c-listings').textContent = rows.length;
+  const tb = document.getElementById('t-listings');
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">No listings</td></tr>'; return; }
+  tb.innerHTML = rows.map(l => {
+    const sell = l.ebay_list_price ?? 0, cost = l.amazon_price ?? 0;
+    const mg = sell > 0 ? (sell - cost) / sell * 100 : null;
+    const title = l.title || '—';
+    return `<tr>
+      <td class="clip" title="${esc(title)}">${esc(title.length > 46 ? title.slice(0,46)+'…' : title)}</td>
+      <td class="mono">${esc(l.amazon_asin ?? '—')}</td>
+      <td>$${sell.toFixed(2)}</td>
+      <td class="muted">$${cost.toFixed(2)}</td>
+      <td class="${mgClass(mg)}">${mg != null ? mg.toFixed(1)+'%' : '—'}</td>
+      <td>${badge(l.status)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadOrders() {
+  const d = await apiFetch('/orders?limit=200');
+  const PENDING = new Set(['pending','fulfillment_triggered','in_progress']);
+  const rows = (d.orders || []).filter(o => PENDING.has(o.fulfillment_status));
+  document.getElementById('c-orders').textContent = rows.length;
+  const tb = document.getElementById('t-orders');
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">No pending orders</td></tr>'; return; }
+  tb.innerHTML = rows.map(o => `<tr>
+    <td class="mono">${esc(o.order_id)}</td>
+    <td>${esc(o.buyer_name || o.buyer_username || '—')}</td>
+    <td class="clip" title="${esc(o.item_title ?? '')}">${esc((o.item_title ?? '—').slice(0,38))}</td>
+    <td class="mono">${esc(o.amazon_asin ?? '—')}</td>
+    <td>$${(o.sale_price ?? 0).toFixed(2)}</td>
+    <td>${badge(o.fulfillment_status)}</td>
+    <td class="muted">${fmtDate(o.created_at)}</td>
+  </tr>`).join('');
+}
+
+async function loadEvents() {
+  const d = await apiFetch('/log/events?limit=50');
+  const rows = d.events || [];
+  document.getElementById('c-events').textContent = d.total ?? rows.length;
+  const tb = document.getElementById('t-events');
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">No events</td></tr>'; return; }
+  tb.innerHTML = rows.map(e => {
+    const ref = e.order_id || e.listing_id || '—';
+    const detail = String(e.detail ?? e.event_type ?? '');
+    return `<tr>
+      <td class="mono" style="white-space:nowrap">${fmtTime(e.created_at)}</td>
+      <td>${badge(e.event_type)}</td>
+      <td class="mono">${esc(ref)}</td>
+      <td class="muted" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${esc(detail)}">${esc(detail.slice(0,110))}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  document.getElementById('dot').className = 'dot stale';
+  const results = await Promise.allSettled([loadStats(), loadListings(), loadOrders(), loadEvents()]);
+  const errs = results.filter(r => r.status === 'rejected').map(r => r.reason?.message);
+  if (errs.length) showErr('Load error: ' + errs.join(' | '));
+  document.getElementById('dot').className = 'dot';
+  startCountdown();
+}
+
+function startCountdown() {
+  clearInterval(_tick);
+  clearTimeout(_timer);
+  _left = INTERVAL;
+
+  const secsEl = document.getElementById('secs');
+  const pbar = document.getElementById('pbar');
+  pbar.style.transition = 'none';
+  pbar.style.width = '100%';
+  requestAnimationFrame(() => { pbar.style.transition = 'width 1s linear'; });
+  secsEl.textContent = _left;
+
+  _tick = setInterval(() => {
+    _left--;
+    secsEl.textContent = _left;
+    pbar.style.width = (_left / INTERVAL * 100) + '%';
+    if (_left <= 0) clearInterval(_tick);
+  }, 1000);
+
+  _timer = setTimeout(refresh, INTERVAL * 1000);
+}
+
+async function doScan(btn) {
+  const box = document.getElementById('result-box');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scanning…';
+  box.className = 'result-box show';
+  box.textContent = 'POST /competitors/scan …';
+  try {
+    const d = await apiFetch('/competitors/scan', { method: 'POST' });
+    box.textContent = JSON.stringify(d, null, 2);
+  } catch (e) {
+    box.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Scan Competitors';
+  }
+}
+
+async function doOpportunities(btn) {
+  const box = document.getElementById('result-box');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Loading…';
+  box.className = 'result-box show';
+  box.textContent = 'GET /margin/opportunities …';
+  try {
+    const d = await apiFetch('/margin/opportunities');
+    box.textContent = JSON.stringify(d, null, 2);
+  } catch (e) {
+    box.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Get Opportunities';
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

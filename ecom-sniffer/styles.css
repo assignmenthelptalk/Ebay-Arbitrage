@@ -1,0 +1,8 @@
+﻿/* Ecom Sniffer — shared content-script styles
+   Badge and eBay-scan UI live inside Shadow DOM; this file is intentionally minimal. */
+
+#ecom-sniffer-host,
+#ecom-sniffer-ebay {
+  all: initial;
+  display: block;
+}

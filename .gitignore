@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# secrets / sessions
+*.env
+!*.env.example
+amazon_session.json
+*_session.json
+
+# debug artifacts
+debug_*.png
+dry10_*.png
+diag_*.png
+
+# misc
+*.log
+.DS_Store

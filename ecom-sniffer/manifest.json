@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Ecom Sniffer",
+  "version": "1.0",
+  "description": "Arbitrage tool: auto-margin Amazon products, scan eBay competitors, list with one click.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://www.amazon.com/*",
+    "https://www.ebay.com/*",
+    "http://13.140.171.246:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Ecom Sniffer"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/*/dp/*",
+        "https://www.amazon.com/dp/*",
+        "https://www.amazon.com/gp/product/*"
+      ],
+      "js": ["content_amazon.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.ebay.com/str/*",
+        "https://www.ebay.com/usr/*"
+      ],
+      "js": ["content_ebay.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
