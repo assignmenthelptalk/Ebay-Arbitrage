@@ -75,6 +75,10 @@ API docs: `http://localhost:8000/docs`
 | `TARGET_MARGIN_PCT` | No | `0.20` | Target profit margin (20%) |
 | `EBAY_FEE_PCT` | No | `0.14` | eBay final value fee % |
 | `EBAY_DEFAULT_CATEGORY_ID` | No | `9355` | Default eBay category for new listings |
+| `API_KEYS` | Yes | `key1,key2` | Comma-separated keys accepted via `X-API-Key` — API fails closed (500) if unset |
+| `ABSOLUTE_MAX_ORDER` | No | `150` | Hard per-order USD ceiling — `approve-fulfillment` refuses above this regardless of what's confirmed |
+| `DAILY_SPEND_CAP` | No | `500` | Hard total-per-day USD cap across all approved fulfillments |
+| `FULFILLMENT_QUEUE` | No | `fulfillment_queue.json` | Path to the gate's queue file — **must be set to the same value (an absolute path is safest) for both the API service and `fulfillment_bot.py`**, since they share this file directly rather than talking over HTTP |
 
 ---
 
@@ -217,10 +221,33 @@ curl http://localhost:8000/orders/pending
 # Calls eBay Sell Fulfillment API; falls back to SQLite cache if API unavailable
 ```
 
-#### Trigger fulfillment (writes job to queue file)
+#### Trigger fulfillment (queues a REVIEW request — does NOT purchase)
 ```bash
-curl -X POST http://localhost:8000/orders/ORDER-ID/fulfill
-# Writes to fulfillment_queue.json; returns queue_position
+curl -X POST http://localhost:8000/orders/ORDER-ID/fulfill -H "X-API-Key: $API_KEY"
+# Looks up the order's Amazon price from its Listing, queues a pending_review
+# job via fulfillment_gate.request_fulfillment(). No purchase happens here.
+```
+
+#### See what's awaiting human review
+```bash
+curl http://localhost:8000/fulfillment/pending -H "X-API-Key: $API_KEY"
+```
+
+#### Approve a fulfillment (sets the hard price ceiling)
+```bash
+curl -X POST http://localhost:8000/orders/ORDER-ID/approve-fulfillment \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"confirmed_max_price": 24.99, "approver": "you@example.com"}'
+# Refused (422) if confirmed_max_price exceeds ABSOLUTE_MAX_ORDER or would
+# exceed DAILY_SPEND_CAP. The bot will never pay above confirmed_max_price,
+# even if the live Amazon price moved since the request.
+```
+
+#### Reject a fulfillment
+```bash
+curl -X POST http://localhost:8000/orders/ORDER-ID/reject-fulfillment \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"reason": "price no longer viable", "approver": "you@example.com"}'
 ```
 
 #### Update order status
@@ -238,22 +265,27 @@ curl "http://localhost:8000/orders?status=pending"
 # status: pending | fulfillment_triggered | fulfilled | failed | refunded
 ```
 
-#### Read fulfillment queue (Playwright script polls this)
-```bash
-curl http://localhost:8000/orders/queue
-# {"queue_length": 1, "jobs": [...]}
-```
+**Queue file:** `/root/arbitrage-api/fulfillment_queue.json` — read/written directly
+by both the API and `fulfillment_bot.py` via `fulfillment_gate.py` (file-locked,
+not an HTTP call), so both services must agree on `FULFILLMENT_QUEUE`.
 
-**Queue file:** `/root/arbitrage-api/fulfillment_queue.json`
-
-**Fulfillment automation flow:**
+**Fulfillment automation flow (human approval required — nothing auto-buys):**
 ```
 eBay sale occurs
   → cron: GET /orders/pending (every 15 min)
-  → POST /orders/{id}/fulfill  (writes job to queue)
-  → Playwright polls GET /orders/queue every 60s
-  → Logs into Amazon → places order → ships to buyer
-  → PATCH /orders/{id}/status {"status": "fulfilled", "tracking_number": "..."}
+  → POST /orders/{id}/fulfill              → fulfillment_gate: pending_review
+  → a human reviews GET /fulfillment/pending
+  → POST /orders/{id}/approve-fulfillment  → fulfillment_gate: approved (with a $ ceiling)
+      (or reject-fulfillment → rejected, nothing further happens)
+  → fulfillment_bot.py calls claim_next_approved() every POLL_INTERVAL
+  → Logs into Amazon, adds to cart, reaches checkout review
+  → Right before "Place Order": reads the LIVE order total and refuses to
+    buy if it exceeds the approved ceiling (in addition to DRY_RUN and the
+    existing price-drift check — neither is bypassed by this)
+  → On success: PATCH /orders/{id}/status (ships tracking to eBay) AND
+    fulfillment_gate.mark_result(success=True, actual_price=...)
+  → On any failure: PATCH /orders/{id}/status {"status":"failed",...} AND
+    mark_result(success=False, error=...)
 ```
 
 ---
@@ -335,6 +367,13 @@ systemctl status arbitrage-api
 # Live logs
 journalctl -u arbitrage-api -f
 ```
+
+**Important:** whatever service runs `fulfillment_bot.py` must load the *same*
+`.env` (`EnvironmentFile=/root/arbitrage-api/.env`) as the API service above.
+`ABSOLUTE_MAX_ORDER`, `DAILY_SPEND_CAP`, and especially `FULFILLMENT_QUEUE`
+have to match on both sides — they share `fulfillment_queue.json` directly via
+a file lock, not over HTTP, so a mismatched path means the bot and the API are
+silently looking at two different queues.
 
 ## Cron: Poll pending orders every 15 minutes
 

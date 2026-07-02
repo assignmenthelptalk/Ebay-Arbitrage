@@ -1,7 +1,6 @@
 import json
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -10,19 +9,29 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Order, Token
-from services import ebay_client
+from models import Listing, Order, Token
+from services import ebay_client, margin_engine
 from services.event_logger import log_event
+from fulfillment_gate import GateError, approve, list_pending, reject, request_fulfillment
 
 router = APIRouter(prefix="/orders", tags=["orders"])
-
-QUEUE_FILE = Path(__file__).parent.parent / "fulfillment_queue.json"
+fulfillment_router = APIRouter(tags=["fulfillment"])
 
 
 class StatusUpdate(BaseModel):
     status: str
     tracking_number: Optional[str] = None
     note: Optional[str] = None
+
+
+class ApproveFulfillmentBody(BaseModel):
+    confirmed_max_price: float
+    approver: Optional[str] = None
+
+
+class RejectFulfillmentBody(BaseModel):
+    reason: str
+    approver: Optional[str] = None
 
 
 def _get_valid_token(db: Session) -> str:
@@ -119,17 +128,6 @@ async def get_pending_orders(db: Session = Depends(get_db)):
     return {"total_pending": len(orders), "orders": [_order_to_dict(o) for o in orders]}
 
 
-@router.get("/queue")
-def get_queue():
-    if not QUEUE_FILE.exists():
-        return {"queue_length": 0, "jobs": []}
-    try:
-        jobs = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        jobs = []
-    return {"queue_length": len(jobs), "jobs": jobs}
-
-
 @router.get("")
 def get_orders(
     db: Session = Depends(get_db),
@@ -156,40 +154,91 @@ async def trigger_fulfillment(order_id: str, db: Session = Depends(get_db)):
             detail={"error": True, "message": "Order already fulfilled", "code": 409},
         )
 
-    now = datetime.utcnow()
-    order.fulfillment_status = "fulfillment_triggered"
-    order.triggered_at = now
-    db.commit()
+    listing = db.query(Listing).filter(Listing.amazon_asin == order.amazon_asin).first()
+    if not listing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": True,
+                "message": f"No listing found for ASIN {order.amazon_asin} — cannot determine Amazon price",
+                "code": 400,
+            },
+        )
 
-    job = {
-        "order_id": order.order_id,
+    # Everything the bot needs to actually place the order rides in meta —
+    # request_fulfillment() only carries order_id/amazon_price/meta.
+    meta = {
         "amazon_asin": order.amazon_asin,
         "quantity": order.quantity,
         "shipping_address": _parse_address(order.shipping_address),
-        "triggered_at": now.isoformat(),
     }
-    queue: list = []
-    if QUEUE_FILE.exists():
+    if order.sale_price:
         try:
-            queue = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+            result = margin_engine.calculate(listing.amazon_price)
+            meta["margin"] = round((order.sale_price - result.total_cost) / order.sale_price, 4)
         except Exception:
-            queue = []
-    queue.append(job)
-    QUEUE_FILE.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+            pass  # best-effort — approval doesn't depend on this
+
+    try:
+        job = request_fulfillment(order_id, listing.amazon_price, meta=meta)
+    except GateError as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+
+    now = datetime.utcnow()
+    order.fulfillment_status = "pending_review"
+    order.triggered_at = now
+    db.commit()
 
     log_event(
         db, "fulfillment_triggered",
         order_id=order_id,
-        detail=f"Fulfillment triggered for order {order_id}",
-        metadata={"order_id": order_id, "amazon_asin": order.amazon_asin, "queue_position": len(queue)},
+        detail=f"Fulfillment review requested for order {order_id}",
+        metadata={"order_id": order_id, "amazon_asin": order.amazon_asin, "amazon_price": listing.amazon_price},
     )
 
     return {
         "order_id": order_id,
-        "status": "fulfillment_triggered",
-        "queue_position": len(queue),
-        "triggered_at": now.isoformat(),
+        "status": "pending_review",
+        "amazon_price": listing.amazon_price,
+        "requested_at": job["requested_at"],
     }
+
+
+@router.post("/{order_id}/approve-fulfillment")
+def approve_fulfillment(order_id: str, payload: ApproveFulfillmentBody, db: Session = Depends(get_db)):
+    """Human approval — confirmed_max_price is the hard ceiling the bot will
+    refuse to pay above, even if the live Amazon price moved since request."""
+    try:
+        job = approve(order_id, payload.confirmed_max_price, payload.approver or "unknown")
+    except GateError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+
+    order = db.query(Order).filter(Order.order_id == order_id).first()
+    if order:
+        order.fulfillment_status = "approved"
+        db.commit()
+
+    return job
+
+
+@router.post("/{order_id}/reject-fulfillment")
+def reject_fulfillment(order_id: str, payload: RejectFulfillmentBody, db: Session = Depends(get_db)):
+    try:
+        job = reject(order_id, payload.reason, payload.approver or "unknown")
+    except GateError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+    order = db.query(Order).filter(Order.order_id == order_id).first()
+    if order:
+        order.fulfillment_status = "rejected"
+        db.commit()
+
+    return job
+
+
+@fulfillment_router.get("/fulfillment/pending")
+def get_pending_fulfillment():
+    return list_pending()
 
 
 @router.patch("/{order_id}/status")

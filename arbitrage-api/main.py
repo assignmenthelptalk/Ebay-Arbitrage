@@ -50,6 +50,7 @@ app.include_router(competitors.router, dependencies=protected)
 app.include_router(margin.router, dependencies=protected)
 app.include_router(listings.router, dependencies=protected)
 app.include_router(orders.router, dependencies=protected)
+app.include_router(orders.fulfillment_router, dependencies=protected)
 app.include_router(logs.router, dependencies=protected)
 
 

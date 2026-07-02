@@ -3,6 +3,11 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+
+# runtime data
+*.db
+fulfillment_queue.json
 
 # secrets / sessions
 *.env

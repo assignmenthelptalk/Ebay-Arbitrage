@@ -7,12 +7,22 @@ import json
 import os
 import time
 import traceback
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from playwright.sync_api import Page, sync_playwright
 
 load_dotenv()
+
+try:
+    # Colocated deployment (VPS: bot runs alongside main.py in the same dir).
+    from fulfillment_gate import claim_next_approved, mark_result
+except ModuleNotFoundError:
+    # Local repo layout: this file sits next to the arbitrage-api/ package.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "arbitrage-api"))
+    from fulfillment_gate import claim_next_approved, mark_result
 
 API_BASE = "http://localhost:8000"
 AMAZON_BASE = os.getenv("AMAZON_BASE_URL", "https://www.amazon.co.uk")
@@ -42,15 +52,6 @@ STEALTH_SCRIPT = """
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
-
-def get_queue() -> list:
-    try:
-        r = requests.get(f"{API_BASE}/orders/queue", timeout=10)
-        return r.json().get("jobs", [])
-    except Exception as e:
-        print(f"[queue] Failed to fetch queue: {e}")
-        return []
-
 
 def update_order_status(order_id: str, status: str,
                         tracking: str = None, note: str = None):
@@ -334,6 +335,30 @@ def _click_first(page: Page, selectors: list) -> bool:
     return False
 
 
+def _read_order_total(page: Page) -> float | None:
+    """Best-effort read of the live order total on the checkout review page.
+    Returns None if it can't be found/parsed — callers must fail closed on None,
+    never assume a total that couldn't be confirmed is within the ceiling."""
+    selectors = [
+        "#subtotals-marketplace-table .grand-total-price",
+        ".grand-total-price",
+        "[data-testid='grand-total-amount']",
+        "#subtotals-marketplace-table td.a-text-right .a-color-price",
+    ]
+    for sel in selectors:
+        el = page.query_selector(sel)
+        if not el:
+            continue
+        try:
+            text = el.inner_text().strip()
+            cleaned = "".join(c for c in text if c.isdigit() or c == ".")
+            if cleaned:
+                return float(cleaned)
+        except Exception:
+            continue
+    return None
+
+
 def enter_shipping_address(page: Page, addr: dict, job: dict) -> bool:
     try:
         # Navigate via cart → Proceed to checkout (direct URL rejected by Amazon)
@@ -382,7 +407,7 @@ def enter_shipping_address(page: Page, addr: dict, job: dict) -> bool:
         return False
 
 
-def complete_purchase(page: Page, job: dict) -> str | None:
+def complete_purchase(page: Page, job: dict) -> tuple[str | None, float | None]:
     try:
         print(f"[bot] Starting complete_purchase at: {page.url}")
         save_debug_screenshot(page, job["order_id"], "checkout_start")
@@ -421,7 +446,7 @@ def complete_purchase(page: Page, job: dict) -> str | None:
         if no_card and not page.query_selector("input[id*='payment'][type='radio']"):
             save_debug_screenshot(page, job["order_id"], "no_payment_method")
             update_order_status(job["order_id"], "failed", note="no payment method on Amazon account — add a credit card to complete orders")
-            return None
+            return None, None
 
         use_payment = (
             page.query_selector("input[value*='Use this payment']")
@@ -444,13 +469,37 @@ def complete_purchase(page: Page, job: dict) -> str | None:
         if not place_order_btn:
             save_debug_screenshot(page, job["order_id"], "no_place_order_btn")
             update_order_status(job["order_id"], "failed", note="place order button not found — check no_place_order_btn screenshot")
-            return None
+            return None, None
+
+        # --- Human-approval ceiling check (fail closed) ---------------------
+        # This is IN ADDITION TO the DRY_RUN and price-drift checks above —
+        # neither of those is touched or replaced by this.
+        approved_amount = job.get("approved_amount")
+        if approved_amount is None:
+            save_debug_screenshot(page, job["order_id"], "no_approved_amount")
+            update_order_status(job["order_id"], "failed", note="job has no approved_amount — refusing to purchase")
+            return None, None
+
+        live_total = _read_order_total(page)
+        if live_total is None:
+            save_debug_screenshot(page, job["order_id"], "total_unreadable")
+            update_order_status(job["order_id"], "failed", note="could not read live order total — refusing to purchase")
+            return None, None
+
+        if live_total > float(approved_amount):
+            save_debug_screenshot(page, job["order_id"], "over_ceiling")
+            update_order_status(
+                job["order_id"], "failed",
+                note=f"live order total {live_total:.2f} exceeds approved ceiling {float(approved_amount):.2f} — purchase blocked",
+            )
+            return None, None
+        # ---------------------------------------------------------------------
 
         # DRY RUN: stop here — do not click the buy button
         if DRY_RUN:
             save_debug_screenshot(page, job["order_id"], "dry_run_order_review")
             print(f"[dry-run] Order review page reached for {job['order_id']} — stopping before purchase. Screenshot saved.")
-            return "DRY-RUN-SIMULATED"
+            return "DRY-RUN-SIMULATED", live_total
 
         print("[bot] Clicking Place Your Order")
         place_order_btn.click()
@@ -464,11 +513,11 @@ def complete_purchase(page: Page, job: dict) -> str | None:
         order_el = page.query_selector("bdi")
         amazon_order_num = order_el.inner_text().strip() if order_el else "UNKNOWN"
         print(f"[order] Amazon order placed: {amazon_order_num}")
-        return amazon_order_num
+        return amazon_order_num, live_total
 
     except Exception as e:
         update_order_status(job["order_id"], "failed", note=f"checkout error: {e}")
-        return None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -477,12 +526,25 @@ def complete_purchase(page: Page, job: dict) -> str | None:
 
 def fulfill(job: dict, pw) -> None:
     order_id = job["order_id"]
-    asin = job["amazon_asin"]
+    # claim_next_approved() jobs carry order-specific fields (asin, shipping
+    # address, quantity) inside meta — request_fulfillment() only accepts
+    # order_id/amazon_price/meta, so that's the only place they can ride.
+    meta = job.get("meta") or {}
+    asin = meta.get("amazon_asin")
     print(f"\n[bot] Processing order {order_id} | ASIN: {asin}")
 
-    raw_addr = job.get("shipping_address", {})
+    if not asin:
+        print(f"[bot] Job for {order_id} has no amazon_asin in meta — cannot fulfill")
+        update_order_status(order_id, "failed", note="fulfillment job missing amazon_asin")
+        mark_result(order_id, success=False, error="missing amazon_asin in job meta")
+        return
+
+    raw_addr = meta.get("shipping_address", {})
     if isinstance(raw_addr, str):
-        raw_addr = json.loads(raw_addr)
+        try:
+            raw_addr = json.loads(raw_addr)
+        except Exception:
+            raw_addr = {}
 
     addr = {
         "full_name": raw_addr.get("full_name", raw_addr.get("fullName", "")),
@@ -494,21 +556,30 @@ def fulfill(job: dict, pw) -> None:
         "phone": raw_addr.get("phone", raw_addr.get("phoneNumber", "")),
     }
 
+    # go_to_product/add_to_cart/enter_shipping_address/complete_purchase read
+    # amazon_asin/shipping_address/amazon_price/approved_amount straight off
+    # the job dict (unchanged from before) — flatten meta onto it here so
+    # those functions don't need to know about the gate's job shape.
+    job = {**job, "amazon_asin": asin, "shipping_address": raw_addr, "quantity": meta.get("quantity", 1)}
+
     browser, context = build_context(pw)
     page = context.new_page()
 
     try:
         set_delivery_zip(page, addr.get("postcode", "10001"), order_id)
         if not go_to_product(page, asin, job):
+            mark_result(order_id, success=False, error="failed at product page (see order status note)")
             return
         if not add_to_cart(page, job):
             save_debug_screenshot(page, order_id, "cart_fail")
+            mark_result(order_id, success=False, error="failed at add-to-cart (see order status note)")
             return
         if not enter_shipping_address(page, addr, job):
             save_debug_screenshot(page, order_id, "address_fail")
+            mark_result(order_id, success=False, error="failed at shipping address (see order status note)")
             return
 
-        amazon_order_num = complete_purchase(page, job)
+        amazon_order_num, actual_price = complete_purchase(page, job)
         if amazon_order_num:
             save_session(context)
             update_order_status(
@@ -517,14 +588,17 @@ def fulfill(job: dict, pw) -> None:
                 tracking=f"AMAZON-{amazon_order_num}",
                 note="Dry-run completed — no real order placed" if DRY_RUN else "Auto-fulfilled by bot",
             )
+            mark_result(order_id, success=True, actual_price=actual_price)
         else:
             save_debug_screenshot(page, order_id, "purchase_fail")
+            mark_result(order_id, success=False, error="checkout failed (see order status note / debug screenshot)")
 
     except Exception as e:
         print(f"[bot] Unhandled error on {order_id}: {e}")
         traceback.print_exc()
         save_debug_screenshot(page, order_id, "unhandled_error")
         update_order_status(order_id, "failed", note=f"unhandled: {str(e)[:200]}")
+        mark_result(order_id, success=False, error=str(e)[:200])
     finally:
         browser.close()
 
@@ -539,13 +613,16 @@ def main():
 
     with sync_playwright() as pw:
         while True:
-            jobs = get_queue()
-            if jobs:
-                print(f"[queue] {len(jobs)} job(s) found")
-                for job in jobs:
-                    fulfill(job, pw)
-            else:
-                print(f"[queue] Empty — sleeping {POLL_INTERVAL}s")
+            claimed_any = False
+            while True:
+                job = claim_next_approved()
+                if not job:
+                    break
+                claimed_any = True
+                print(f"[queue] Claimed approved job for order {job['order_id']}")
+                fulfill(job, pw)
+            if not claimed_any:
+                print(f"[queue] No approved jobs — sleeping {POLL_INTERVAL}s")
             time.sleep(POLL_INTERVAL)
 
 
