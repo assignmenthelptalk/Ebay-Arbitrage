@@ -121,14 +121,19 @@ def log_feedback(db: Session = Depends(get_db)):
         .filter(EventLog.event_type == "sale", EventLog.created_at >= cutoff)
         .all()
     )
-    margins = [
-        float(e.metadata_["margin"])
-        for e in sale_events
-        if e.metadata_ and "margin" in e.metadata_
-    ]
+    margin_pairs: list[tuple[Optional[str], float]] = []
+    for e in sale_events:
+        if not e.metadata_ or "margin" not in e.metadata_:
+            continue
+        try:
+            margin_pairs.append((e.listing_id, float(e.metadata_["margin"])))
+        except (TypeError, ValueError):
+            continue
+
+    margins = [m for _, m in margin_pairs]
     avg_margin = round(sum(margins) / len(margins), 4) if margins else None
-    best_listing = sale_events[margins.index(max(margins))].listing_id if margins else None
-    worst_listing = sale_events[margins.index(min(margins))].listing_id if margins else None
+    best_listing = max(margin_pairs, key=lambda p: p[1])[0] if margin_pairs else None
+    worst_listing = min(margin_pairs, key=lambda p: p[1])[0] if margin_pairs else None
 
     # fulfillment health
     total_triggered = (

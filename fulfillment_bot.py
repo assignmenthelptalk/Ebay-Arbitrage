@@ -106,10 +106,14 @@ def build_context(pw):
     context.add_init_script(STEALTH_SCRIPT)
 
     if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE) as f:
-            cookies = json.load(f)
-        context.add_cookies(cookies)
-        print("[session] Loaded Amazon cookies from file")
+        try:
+            with open(SESSION_FILE) as f:
+                cookies = json.load(f)
+            context.add_cookies(cookies)
+            print("[session] Loaded Amazon cookies from file")
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[session] WARNING: Session file is unreadable/corrupt ({exc}) — "
+                  f"run setup_session.py to regenerate it")
     else:
         print("[session] WARNING: No session file found — run setup_session.py first")
 

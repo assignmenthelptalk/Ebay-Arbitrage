@@ -251,8 +251,21 @@ function showErr(msg) {
   showErr._t = setTimeout(() => el.style.display = 'none', 8000);
 }
 
+function getApiKey() {
+  let key = localStorage.getItem('apiKey');
+  if (!key) {
+    key = prompt('Enter API key for this dashboard (set via API_KEYS on the server):') || '';
+    if (key) localStorage.setItem('apiKey', key);
+  }
+  return key;
+}
+
 async function apiFetch(url, opts) {
-  const r = await fetch(url, opts);
+  const headers = { ...(opts?.headers || {}), 'X-API-Key': getApiKey() };
+  const r = await fetch(url, { ...opts, headers });
+  if (r.status === 401 || r.status === 403) {
+    localStorage.removeItem('apiKey');
+  }
   if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(`${r.status}: ${t.slice(0,100)}`); }
   return r.json();
 }

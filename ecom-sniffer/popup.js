@@ -113,4 +113,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-orders').addEventListener('click', () => {
     chrome.tabs.create({ url: DASHBOARD });
   });
+
+  document.getElementById('btn-set-key').addEventListener('click', async () => {
+    const { apiKey: current } = await chrome.storage.local.get('apiKey');
+    const next = prompt('Enter API key (sent as X-API-Key header):', current || '');
+    if (next === null) return;
+    if (next.trim()) {
+      await chrome.storage.local.set({ apiKey: next.trim() });
+    } else {
+      await chrome.storage.local.remove('apiKey');
+    }
+    load();
+  });
 });

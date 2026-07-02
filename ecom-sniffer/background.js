@@ -6,18 +6,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const { method = 'GET', path, body } = msg;
   const url = `${API_BASE}${path}`;
 
-  fetch(url, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  })
-    .then(async (r) => {
-      const data = await r.json().catch(() => ({}));
-      sendResponse({ ok: r.ok, status: r.status, data });
+  chrome.storage.local.get('apiKey').then(({ apiKey }) => {
+    const headers = body ? { 'Content-Type': 'application/json' } : {};
+    if (apiKey) headers['X-API-Key'] = apiKey;
+
+    fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
     })
-    .catch((err) => {
-      sendResponse({ ok: false, error: err.message, data: null });
-    });
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        sendResponse({ ok: r.ok, status: r.status, data });
+      })
+      .catch((err) => {
+        sendResponse({ ok: false, error: err.message, data: null });
+      });
+  });
 
   return true; // keep message channel open for async response
 });
