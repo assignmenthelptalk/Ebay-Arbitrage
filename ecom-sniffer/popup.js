@@ -75,8 +75,25 @@ async function load() {
   }
 }
 
+function loadKeyStatus() {
+  chrome.storage.local.get(['apiKey'], ({ apiKey }) => {
+    document.getElementById('key-status').textContent = apiKey ? 'Key saved.' : 'No key set — requests will fail.';
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   load();
+  loadKeyStatus();
+
+  document.getElementById('btn-save-key').addEventListener('click', () => {
+    const input = document.getElementById('api-key-input');
+    const value = input.value.trim();
+    if (!value) return;
+    chrome.storage.local.set({ apiKey: value }, () => {
+      input.value = '';
+      loadKeyStatus();
+    });
+  });
 
   document.getElementById('btn-scan').addEventListener('click', async () => {
     const seller = prompt('Enter eBay seller username to scan:');

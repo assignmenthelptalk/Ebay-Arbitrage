@@ -83,6 +83,31 @@
       background: #0f2a1a;
       border-top: 1px solid #238636;
     }
+    .settings-row {
+      display: flex;
+      gap: 6px;
+    }
+    .settings-row input {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .settings-row button {
+      padding: 6px 10px;
+      border: none;
+      border-radius: 6px;
+      background: #21262d;
+      color: #e6edf3;
+      border: 1px solid #30363d;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .settings-row button:hover { background: #30363d; }
+    #key-status { font-size: 10px; color: #8b949e; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -133,6 +158,15 @@
     <button class="btn btn-gray" id="btn-orders">Check Orders</button>
     <button class="btn btn-gray" id="btn-set-key">Set API Key</button>
   </div>
+
+  <section>
+    <h2>API Key</h2>
+    <div class="settings-row">
+      <input type="password" id="api-key-input" placeholder="X-API-Key">
+      <button id="btn-save-key">Save</button>
+    </div>
+    <div id="key-status"></div>
+  </section>
 
   <div id="scan-result"></div>
   <div class="error-banner" id="error-banner"></div>

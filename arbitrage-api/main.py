@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -21,14 +22,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
+_docs_enabled = os.getenv("ENABLE_DOCS", "false").lower() == "true"
+
 app = FastAPI(
     title="eBay Arbitrage API",
     description="Central nervous system for zero-inventory eBay-to-Amazon arbitrage",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 
