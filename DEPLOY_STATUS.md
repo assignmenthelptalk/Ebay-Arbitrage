@@ -84,14 +84,20 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
      - `.claude/settings.local.json:5-6` — Claude Code's own local tool-permission allowlist, unrelated to app runtime
 
    **Fulfillment bot investigation (2026-07-03, read-only, no changes made):**
-   - **Launch mechanism:** dedicated unit `fulfillment-bot.service` (`enabled`, currently
-     `inactive (dead)` — no process running, `ps aux` confirmed). Not API-spawned (no
-     subprocess/create_task/BackgroundTasks reference to it in the API code). Not cron — both
-     jobizi's and root's crontabs are empty. Not manual (no evidence of ad-hoc runs).
-   - **Reads `/root` entirely, today:** `WorkingDirectory=/root/arbitrage-api`,
+   - **Launch mechanism (now fully mapped):** the ONLY way the bot runs is dedicated unit
+     `fulfillment-bot.service`. Not API-spawned (no subprocess/create_task/BackgroundTasks
+     reference to it in the API code). Not cron — both jobizi's and root's crontabs are empty. Not
+     manual (no evidence of ad-hoc runs).
+   - **Reads `/root` entirely:** `WorkingDirectory=/root/arbitrage-api`,
      `ExecStart=/root/arbitrage-api/.venv/bin/python fulfillment_bot.py`,
-     `EnvironmentFile=/root/arbitrage-api/.env`. Self-consistent (not mixed), so harmless while
-     dead — but `enabled`, so a reboot would restart it still fully wired to `/root`.
+     `EnvironmentFile=/root/arbitrage-api/.env`. Self-consistent (not mixed).
+   - **DISABLED as a safety step on 2026-07-03.** Was `enabled`+`inactive` (would auto-start on
+     reboot, still fully wired to `/root`, mid-migration). Ran `sudo systemctl disable
+     fulfillment-bot.service` — confirmed before (`enabled`/`inactive`) and after
+     (`disabled`/`inactive`). This only removed the boot-time symlink
+     (`/etc/systemd/system/multi-user.target.wants/fulfillment-bot.service`); the unit file itself
+     is untouched and fully reversible (`sudo systemctl enable fulfillment-bot.service` restores
+     it). `arbitrage-api.service` (the live API) was not touched.
    - **A naive repoint would crash the unit, not just leave it stale — two structural gaps found:**
      1. `fulfillment_bot.py` lives at the clone's **repo root**
         (`/home/jobizi/ebay-arbitrage/fulfillment_bot.py`), not inside `arbitrage-api/` — the
@@ -105,10 +111,23 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
         *separate* `requirements.txt` at the repo root, and **no venv exists yet for it** anywhere
         in the clone. Needs a new venv built + `playwright install` for the browser binary before
         the bot can run under the clone at all — a setup step, not a unit edit.
-   - **Session file is fine:** clone's `amazon_session.json` (5589 bytes, copied 2026-07-03 09:33
-     in Phase 2) confirmed current — root's copy is unchanged since 2026-06-15 (same 5589 bytes),
-     so nothing has drifted since the Phase 2 migration.
-   - **Proposed fix (not applied — awaiting go-ahead):**
+   - **Session file is fine but aging:** clone's `amazon_session.json` (5589 bytes, copied
+     2026-07-03 09:33 in Phase 2) confirmed current — root's copy is unchanged since 2026-06-15
+     (same 5589 bytes), so nothing has drifted since the Phase 2 migration. Session is ~3 weeks old
+     as of 2026-07-03; may need a fresh `setup_session.py` login when the bot is next actually run
+     — not a blocker now, just don't assume it's still valid by the time repointing happens.
+   - **PENDING TASK (not done — next deliberate session): repoint the bot to the clone.** Requires,
+     in order:
+     1. Build a repo-root venv from `/home/jobizi/ebay-arbitrage/requirements.txt`
+        (`playwright==1.44.0` + `playwright install <browser>`, `python-telegram-bot`).
+     2. Repoint `fulfillment-bot.service`: `WorkingDirectory=/home/jobizi/ebay-arbitrage`,
+        `ExecStart=<repo-root-venv>/bin/python fulfillment_bot.py`,
+        `EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env`.
+     3. Test-run manually (not via systemd) before re-enabling.
+     4. Bundle with the Telegram approver setup — same repo-root venv already has
+        `python-telegram-bot`, so do both together rather than building the venv twice.
+     5. Only `sudo systemctl enable` it again after the manual test passes.
+     Proposed unit diff (not applied):
      ```ini
      [Service]
      User=root
@@ -116,11 +135,12 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
      ExecStart=/home/jobizi/ebay-arbitrage/<NEW-BOT-VENV>/bin/python fulfillment_bot.py
      EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env
      ```
-     (`Restart=always`, `RestartSec=10`, `[Install]` unchanged.) `<NEW-BOT-VENV>` needs to be built
-     first from the repo-root `requirements.txt`. Suggested order: build venv → test bot standalone
-     (not via systemd) against a spare/dry-run path → then repoint+enable the unit, mirroring the
-     test-before-cutover approach used for the API.
-   - **`deploy/arbitrage-telegram-approver.service:8,9,12`** (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 7 below) happens; not investigated this round.
+     (`Restart=always`, `RestartSec=10`, `[Install]` unchanged.)
+   - **`deploy/arbitrage-telegram-approver.service:8,9,12`** (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 7 below) happens; not investigated this round. Bundle with the bot venv work per step 4 above.
+   - **Remaining deploy tasks, in short:** (1) fulfillment bot venv + repoint, (2) Telegram
+     approver setup — both bundled together per above. Everything required before flipping
+     `DRY_RUN=false` for real-money go-live is already tracked separately in the go-live checklist
+     further down this doc.
 2. **Phase 1 — build clone `.env`.** Seed from old prod `.env` (carries eBay creds without printing).
    Decisions: `DRY_RUN=true` (explicit), drop `EBAY_FEE_PCT` (dead), `FULFILLMENT_QUEUE`=absolute
    clone path, `ENABLE_DOCS=false`, **no Telegram vars this round** (API-first). Fill `API_KEYS` and
