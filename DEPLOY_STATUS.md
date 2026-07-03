@@ -5,14 +5,16 @@ below; update it as phases complete.
 
 ## The big picture
 Two copies of the app on the VPS (13.140.171.246):
-- **`/root/arbitrage-api`** — the CURRENTLY LIVE service (port 8000, systemd `arbitrage-api.service`,
-  `User=root`, `EnvironmentFile=/root/arbitrage-api/.env`). Runs the OLD, pre-auth code. NOT a git
-  clone. **Leave intact as the rollback target** until the cutover is confirmed healthy.
-- **`/home/jobizi/ebay-arbitrage`** — the git clone with the NEW code (commit `81b6b3d`). Verified,
-  committed locally, **not yet pushed** to origin, **not yet live**.
+- **`/root/arbitrage-api`** — the OLD pre-auth code. NOT a git clone. As of Phase 4, no longer live —
+  `arbitrage-api.service` now runs from the clone. **Retained as the rollback target** (see Rollback
+  section) until explicitly retired.
+- **`/home/jobizi/ebay-arbitrage`** — the git clone with the NEW code. **NOW LIVE as of Phase 4**
+  (port 8000, systemd `arbitrage-api.service`, `User=root`,
+  `EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env`). Committed locally, still **not
+  pushed** to origin.
 
-The plan: repoint the systemd service from `/root/...` to the clone (Option A), migrating live
-data. Currently mid-way, still **pre-production** — nothing has touched the live service.
+Phase 4 (cutover) is complete and verified. API-only — Telegram approver not yet repointed/started
+(separate later step, item 8 below).
 
 ## Done
 - Auth: `auth.py` — API-key via `X-API-Key`, fails closed on empty `API_KEYS`, `compare_digest`.
@@ -53,6 +55,23 @@ data. Currently mid-way, still **pre-production** — nothing has touched the li
     `.env` (Phase 1 gap, not a code bug — `auth.py` fail-closed as designed). User filled in real
     keys directly in the clone's `.env` (do NOT re-seed this file from prod's `.env` — that's what
     blanked them originally). Re-ran; all checks passed.
+- **Phase 4 — DONE (2026-07-03).** Cut `arbitrage-api.service` over to the clone, API-only (no
+  Telegram approver this round). Backups taken first: `~/arbitrage-api.service.bak-2026-07-03` and
+  `/root/arbitrage-api/.env.bak-2026-07-03` (root-owned, verified present before any change).
+  Unit diff reviewed and approved before applying — only `WorkingDirectory`, `ExecStart`,
+  `EnvironmentFile` changed to clone paths; `User=root`, `Restart=always`, `RestartSec=5`,
+  `[Install]` all left identical. Pre-flight re-confirmed `API_KEYS`/`BOT_API_KEY` non-empty and
+  `DRY_RUN=true`/`EBAY_ENV=sandbox` unchanged immediately before restart. After
+  `daemon-reload` + `restart`:
+  - `systemctl status` → `active (running)`, not restart-looping, single `uvicorn` process on
+    `:8000`, cwd/exec path confirmed under the clone.
+  - Live auth triangle on `:8000`: no-key→401, wrong-key→403, real-key→200 (confirmed, key length
+    43 — value not printed).
+  - `/docs` → 404 (still closed).
+  - No 500-storm, no "authentication is not configured" in status/behavior.
+  - `/root/arbitrage-api` left in place, untouched, as the rollback target (rollback command is in
+    the Rollback section below, using `~/arbitrage-api.service.bak-2026-07-03`).
+  - Not pushed to origin. Telegram approver not started. `DRY_RUN`/`EBAY_ENV` not flipped.
 1. **Repoint hardcoded `/root` paths — do this as part of Phase 4, not before.** Scanned the whole
    clone (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`)
    rather than hardcoding the new clone path, so this doesn't recur on the next move.
@@ -72,24 +91,27 @@ data. Currently mid-way, still **pre-production** — nothing has touched the li
 3. **Phase 2 — migrate data.** `sudo cp` `arbitrage.db` + `amazon_session.json` from `/root` into
    clone. Do NOT migrate old `fulfillment_queue.json` (old format, dry-run test data) — init fresh
    `{"jobs": [], "spend": {}}`. Leave debug PNGs behind.
-4. **Phase 3 — test boot.** Run uvicorn from clone on a spare port (e.g. 8130). Verify
-   /fulfillment/pending → 401 no key / 200 with key / 403 wrong key; /docs → 404; DB reads work.
-   Kill test server. Prod still untouched.
-5. **Phase 4 — cutover ("cut over now").** Back up unit file + old `.env`. Edit unit:
-   WorkingDirectory / ExecStart (clone's `.venv/bin/uvicorn`) / EnvironmentFile → clone. Keep
-   `User=root` (lower-risk; ensure migrated files readable). Repoint the `/root` paths from item 1
-   above (env-driven, not re-hardcoded). `daemon-reload` + `restart`.
-6. **Phase 5 — verify live + rollback ready.** status active (not restart-looping); live :8000 auth
-   checks; one process on 8000; tail journal for 500-storm (= empty API_KEYS → roll back).
-7. **Push** `81b6b3d` (+ bot fix commit) to origin when ready.
-8. **Telegram approver** — separate step after API confirmed healthy: repoint its unit
+4. ~~**Phase 3 — test boot.**~~ DONE, see above.
+5. ~~**Phase 4 — cutover.**~~ DONE, see above. Live verification (status active, auth checks, one
+   process on 8000, no 500-storm) was folded into the Phase 4 cutover verification itself, so the
+   separate "Phase 5" verify pass below is effectively already covered — nothing further needed
+   there unless something regresses.
+6. **Push** `81b6b3d` (+ bot fix commit, + Phase 2/3/4 doc commits) to origin when ready.
+7. **Telegram approver** — separate step after API confirmed healthy: repoint its unit
    (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
-   install/enable.
+   install/enable. **Not started this round (API-only cutover, by design).**
 
-## Rollback (keep ready during Phase 4/5)
-Restore `~/arbitrage-api.service.bak` → `sudo systemctl daemon-reload` → `sudo systemctl restart
-arbitrage-api.service`. Puts prod back on `/root/arbitrage-api` with its old `.env`. `/root` stays
-intact until you explicitly decide otherwise.
+**Still open and now more time-sensitive since the API is live from the clone:** item 1's
+runtime-critical repoints (`fulfillment_bot.py` `SESSION_FILE`/`DEBUG_DIR` hardcoded to
+`/root/arbitrage-api`) were **not** touched by the Phase 4 cutover (that was unit-file only, as
+scoped). If/when the fulfillment bot is run, it will still read/write `/root` paths, not the
+clone — worth resolving before relying on the bot against the now-live clone-backed API.
+
+## Rollback (keep ready)
+Restore `~/arbitrage-api.service.bak-2026-07-03` → `sudo systemctl daemon-reload` → `sudo systemctl
+restart arbitrage-api.service`. Puts the service back on `/root/arbitrage-api` with its old `.env`
+(`/root/arbitrage-api/.env.bak-2026-07-03` also preserved separately). `/root/arbitrage-api` stays
+intact and untouched until you explicitly decide otherwise.
 
 ## BEFORE flipping DRY_RUN=false (go-live checklist — real money)
 None of these block the sandbox cutover; all matter before autonomous real purchasing.
