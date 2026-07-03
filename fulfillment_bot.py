@@ -32,6 +32,15 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 SESSION_FILE = "/root/arbitrage-api/amazon_session.json"
 DEBUG_DIR = "/root/arbitrage-api"
 
+# Must be one of the values in the API's API_KEYS. Without it, every status
+# update below 401s once the API's auth is enabled: purchases still happen
+# but never get marked fulfilled and tracking never reaches eBay.
+BOT_API_KEY = os.getenv("BOT_API_KEY", "")
+if not BOT_API_KEY:
+    print("[bot] WARNING: BOT_API_KEY is not set — /orders/{id}/status calls "
+          "will 401 against an API with API_KEYS configured, and fulfilled "
+          "orders will never be marked as such.")
+
 STEALTH_SCRIPT = """
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
     Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
@@ -61,12 +70,17 @@ def update_order_status(order_id: str, status: str,
     if note:
         payload["note"] = note
     try:
-        requests.patch(
+        resp = requests.patch(
             f"{API_BASE}/orders/{order_id}/status",
             json=payload,
+            headers={"X-API-Key": BOT_API_KEY},
             timeout=10,
         )
-        print(f"[api] Order {order_id} → {status}")
+        if resp.status_code in (401, 403):
+            print(f"[api] Order {order_id} → {status} REJECTED ({resp.status_code}): "
+                  f"BOT_API_KEY missing/invalid — check it matches a value in API_KEYS")
+        else:
+            print(f"[api] Order {order_id} → {status}")
     except Exception as e:
         print(f"[api] Failed to update order {order_id}: {e}")
 

@@ -27,13 +27,24 @@ data. Currently mid-way, still **pre-production** — nothing has touched the li
 - Dead cron poller (`*/15 curl /orders/pending`) removed from root crontab (backup:
   `/root/root-crontab.bak-<date>`).
 - venv created in the clone. `.env` key diff completed.
+- Bot fix: `fulfillment_bot.py` now reads `BOT_API_KEY` from env, warns on startup if unset, sends
+  it as `X-API-Key` on the `/orders/{id}/status` PATCH (the bot's only API call), and logs a clear
+  `REJECTED (401/403)` message if the key is missing/wrong. `.env.example` and both affected
+  `README.md` curl examples (status PATCH + cron) updated to match.
 
 ## In progress / next (resume here)
-1. **[CRITICAL — do before cutover] Fix bot's missing API key.** `fulfillment_bot.py`'s
-   `update_order_status()` PATCHes `/orders/{id}/status` with no `X-API-Key` → will 401 once
-   `API_KEYS` is set, so purchases never get marked fulfilled and eBay tracking never uploads.
-   Fix: add `BOT_API_KEY` env var, attach header to every bot→API call, warn if unset.
-   (Prompt: FIX_BOT_API_KEY.md.) Then commit.
+1. **Repoint hardcoded `/root` paths — do this as part of Phase 4, not before.** Scanned the whole
+   clone (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`)
+   rather than hardcoding the new clone path, so this doesn't recur on the next move.
+   - **Runtime-critical (must repoint before/at cutover):**
+     - `fulfillment_bot.py:32` `SESSION_FILE = "/root/arbitrage-api/amazon_session.json"` — bot's Amazon cookie jar
+     - `fulfillment_bot.py:33` `DEBUG_DIR = "/root/arbitrage-api"` — debug screenshot dir on failure
+     - `deploy/arbitrage-telegram-approver.service:8,9,12` (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 8 below) happens
+   - **Script (not a running service) — will silently hit the old DB if run post-cutover:**
+     - `insert_test_order.py:2` `sqlite3.connect('/root/arbitrage-api/arbitrage.db')`
+   - **Docs/tooling only — mention `/root` accurately for the current live setup, no action needed:**
+     - `arbitrage-api/README.md:269,352-356,373,388,415,422` (systemd template, queue-file note, cron example, Telegram env note)
+     - `.claude/settings.local.json:5-6` — Claude Code's own local tool-permission allowlist, unrelated to app runtime
 2. **Phase 1 — build clone `.env`.** Seed from old prod `.env` (carries eBay creds without printing).
    Decisions: `DRY_RUN=true` (explicit), drop `EBAY_FEE_PCT` (dead), `FULFILLMENT_QUEUE`=absolute
    clone path, `ENABLE_DOCS=false`, **no Telegram vars this round** (API-first). Fill `API_KEYS` and
@@ -46,12 +57,14 @@ data. Currently mid-way, still **pre-production** — nothing has touched the li
    Kill test server. Prod still untouched.
 5. **Phase 4 — cutover ("cut over now").** Back up unit file + old `.env`. Edit unit:
    WorkingDirectory / ExecStart (clone's `.venv/bin/uvicorn`) / EnvironmentFile → clone. Keep
-   `User=root` (lower-risk; ensure migrated files readable). `daemon-reload` + `restart`.
+   `User=root` (lower-risk; ensure migrated files readable). Repoint the `/root` paths from item 1
+   above (env-driven, not re-hardcoded). `daemon-reload` + `restart`.
 6. **Phase 5 — verify live + rollback ready.** status active (not restart-looping); live :8000 auth
    checks; one process on 8000; tail journal for 500-storm (= empty API_KEYS → roll back).
 7. **Push** `81b6b3d` (+ bot fix commit) to origin when ready.
-8. **Telegram approver** — separate step after API confirmed healthy: repoint its unit to clone
-   paths, set TELEGRAM_* vars, install/enable.
+8. **Telegram approver** — separate step after API confirmed healthy: repoint its unit
+   (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
+   install/enable.
 
 ## Rollback (keep ready during Phase 4/5)
 Restore `~/arbitrage-api.service.bak` → `sudo systemctl daemon-reload` → `sudo systemctl restart

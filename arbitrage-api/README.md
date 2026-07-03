@@ -253,10 +253,11 @@ curl -X POST http://localhost:8000/orders/ORDER-ID/reject-fulfillment \
 #### Update order status
 ```bash
 curl -X PATCH http://localhost:8000/orders/ORDER-ID/status \
-  -H "Content-Type: application/json" \
+  -H "X-API-Key: $BOT_API_KEY" -H "Content-Type: application/json" \
   -d '{"status": "fulfilled", "tracking_number": "TRK123456", "note": "Royal Mail"}'
 # status: fulfilled | failed | refunded
 # If fulfilled + tracking_number: calls eBay shipping_fulfillment API
+# Called by fulfillment_bot.py using BOT_API_KEY (must be one of API_KEYS).
 ```
 
 #### Get all orders
@@ -411,7 +412,7 @@ journalctl -u arbitrage-telegram-approver -f
 ## Cron: Poll pending orders every 15 minutes
 
 ```bash
-(crontab -l 2>/dev/null; echo "*/15 * * * * curl -s http://localhost:8000/orders/pending >> /root/arbitrage-api/cron.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "*/15 * * * * curl -s -H 'X-API-Key: <your-key>' http://localhost:8000/orders/pending >> /root/arbitrage-api/cron.log 2>&1") | crontab -
 ```
 
 ---
