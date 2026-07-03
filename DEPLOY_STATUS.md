@@ -33,6 +33,26 @@ data. Currently mid-way, still **pre-production** — nothing has touched the li
   `README.md` curl examples (status PATCH + cron) updated to match.
 
 ## In progress / next (resume here)
+- **Phase 2 — DONE.** Migrated `arbitrage.db` (61440 bytes; 13 orders, 5 listings, 36 event_log rows,
+  1 token) and `amazon_session.json` (5589 bytes) from `/root` via sudo cp, chowned to jobizi.
+  Initialized fresh `fulfillment_queue.json` = `{"jobs": [], "spend": {}}` (did NOT copy old
+  `/root` queue). No debug PNGs copied. All three confirmed jobizi-owned, non-zero size.
+- **Phase 3 — VERIFIED.** Test-booted clone on `127.0.0.1:8130` (not `:8000`, not `0.0.0.0`), prod
+  untouched throughout.
+  - Boots clean, no import errors.
+  - Auth triangle: no-key→401, key→200, bad-key→403 (all pass).
+  - `/docs` → 404 (closed).
+  - **DB_PATH resolves correctly to the migrated DB** — confirmed exactly one `arbitrage.db` on
+    disk, at the `DB_PATH` location, with the migrated row counts intact; no stray/empty DB created
+    in cwd or elsewhere.
+  - `/fulfillment/pending` with key → `[]` (fresh queue read correctly).
+  - Fulfillment router present and routed (`/fulfillment/pending`, `/fulfillment/approve` respond,
+    not framework 404s).
+  - Test server killed; confirmed nothing listening on 8130 afterward.
+  - Note: first pass of this test failed because `API_KEYS`/`BOT_API_KEY` were blank in the clone's
+    `.env` (Phase 1 gap, not a code bug — `auth.py` fail-closed as designed). User filled in real
+    keys directly in the clone's `.env` (do NOT re-seed this file from prod's `.env` — that's what
+    blanked them originally). Re-ran; all checks passed.
 1. **Repoint hardcoded `/root` paths — do this as part of Phase 4, not before.** Scanned the whole
    clone (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`)
    rather than hardcoding the new clone path, so this doesn't recur on the next move.
