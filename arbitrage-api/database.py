@@ -1,7 +1,10 @@
+import os
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-DATABASE_URL = "sqlite:///./arbitrage.db"
+_db_path = os.getenv("DB_PATH", "")
+DATABASE_URL = f"sqlite:///{_db_path}" if _db_path else "sqlite:///./arbitrage.db"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

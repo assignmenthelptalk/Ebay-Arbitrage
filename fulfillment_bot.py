@@ -29,8 +29,8 @@ AMAZON_BASE = os.getenv("AMAZON_BASE_URL", "https://www.amazon.co.uk")
 POLL_INTERVAL = int(os.getenv("QUEUE_POLL_INTERVAL", 60))
 MAX_PRICE_DRIFT = float(os.getenv("MAX_PRICE_DRIFT_PCT", 0.10))
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
-SESSION_FILE = "/root/arbitrage-api/amazon_session.json"
-DEBUG_DIR = "/root/arbitrage-api"
+SESSION_FILE = os.getenv("SESSION_FILE", "/root/arbitrage-api/amazon_session.json")
+DEBUG_DIR = os.getenv("DEBUG_DIR", "/root/arbitrage-api")
 
 # Must be one of the values in the API's API_KEYS. Without it, every status
 # update below 401s once the API's auth is enabled: purchases still happen
