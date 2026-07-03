@@ -153,7 +153,16 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
    process on 8000, no 500-storm) was folded into the Phase 4 cutover verification itself, so the
    separate "Phase 5" verify pass below is effectively already covered — nothing further needed
    there unless something regresses.
-6. **Push** `81b6b3d` (+ bot fix commit, + Phase 2/3/4 doc commits) to origin when ready.
+6. ~~**Push.**~~ DONE (2026-07-03). Pre-push safety checks passed: real `.env` confirmed gitignored,
+   never tracked, never committed in any of the 8 commits (`git check-ignore` / `git ls-files` /
+   `git log --diff-filter=A -- .env` all clean); diff scanned for key-shaped content, only hits
+   were doc lines showing how to *generate* a key (`token_urlsafe`), no real secrets. Pushed 8
+   commits (`81b6b3d`..`ac01b1e`) to `origin/main` — auth used `gh auth login` +
+   `gh auth setup-git` (the shell's `GIT_ASKPASS` pointed at a stale/unreachable VS Code IPC
+   socket, so plain `git push` failed auth; unset `GIT_ASKPASS`/`VSCODE_GIT_IPC_HANDLE` for the
+   push once `gh` was authenticated). `git status` confirms up to date with `origin/main`, nothing
+   ahead. `arbitrage-api/.env.save` (untracked, unrelated leftover file) was left alone — not
+   staged, not pushed.
 7. **Telegram approver** — separate step after API confirmed healthy: repoint its unit
    (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
    install/enable. **Not started this round (API-only cutover, by design).**
