@@ -72,18 +72,55 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
   - `/root/arbitrage-api` left in place, untouched, as the rollback target (rollback command is in
     the Rollback section below, using `~/arbitrage-api.service.bak-2026-07-03`).
   - Not pushed to origin. Telegram approver not started. `DRY_RUN`/`EBAY_ENV` not flipped.
-1. **Repoint hardcoded `/root` paths — do this as part of Phase 4, not before.** Scanned the whole
-   clone (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`)
-   rather than hardcoding the new clone path, so this doesn't recur on the next move.
-   - **Runtime-critical (must repoint before/at cutover):**
-     - `fulfillment_bot.py:32` `SESSION_FILE = "/root/arbitrage-api/amazon_session.json"` — bot's Amazon cookie jar
-     - `fulfillment_bot.py:33` `DEBUG_DIR = "/root/arbitrage-api"` — debug screenshot dir on failure
-     - `deploy/arbitrage-telegram-approver.service:8,9,12` (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 8 below) happens
+1. **Repoint hardcoded `/root` paths.** Scanned the whole clone
+   (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`) rather
+   than hardcoding the new clone path, so this doesn't recur on the next move.
+   - **`fulfillment_bot.py` / `fulfillment-bot.service` — investigated 2026-07-03, NOT yet fixed.
+     More than an env-var repoint; see full findings below.**
    - **Script (not a running service) — will silently hit the old DB if run post-cutover:**
      - `insert_test_order.py:2` `sqlite3.connect('/root/arbitrage-api/arbitrage.db')`
    - **Docs/tooling only — mention `/root` accurately for the current live setup, no action needed:**
      - `arbitrage-api/README.md:269,352-356,373,388,415,422` (systemd template, queue-file note, cron example, Telegram env note)
      - `.claude/settings.local.json:5-6` — Claude Code's own local tool-permission allowlist, unrelated to app runtime
+
+   **Fulfillment bot investigation (2026-07-03, read-only, no changes made):**
+   - **Launch mechanism:** dedicated unit `fulfillment-bot.service` (`enabled`, currently
+     `inactive (dead)` — no process running, `ps aux` confirmed). Not API-spawned (no
+     subprocess/create_task/BackgroundTasks reference to it in the API code). Not cron — both
+     jobizi's and root's crontabs are empty. Not manual (no evidence of ad-hoc runs).
+   - **Reads `/root` entirely, today:** `WorkingDirectory=/root/arbitrage-api`,
+     `ExecStart=/root/arbitrage-api/.venv/bin/python fulfillment_bot.py`,
+     `EnvironmentFile=/root/arbitrage-api/.env`. Self-consistent (not mixed), so harmless while
+     dead — but `enabled`, so a reboot would restart it still fully wired to `/root`.
+   - **A naive repoint would crash the unit, not just leave it stale — two structural gaps found:**
+     1. `fulfillment_bot.py` lives at the clone's **repo root**
+        (`/home/jobizi/ebay-arbitrage/fulfillment_bot.py`), not inside `arbitrage-api/` — the
+        `/root` layout is flat (bot colocated with `main.py`); the clone separated bot/scraper
+        scripts from the `arbitrage-api/` package. The bot's own code already anticipates this
+        (try `from fulfillment_gate import ...` colocated, except `ModuleNotFoundError` → inserts
+        `arbitrage-api/` onto `sys.path`) — confirming the intended clone `WorkingDirectory` is the
+        **repo root**, not `arbitrage-api/`.
+     2. `arbitrage-api/.venv` is missing `playwright` (`sync_playwright` import), which the bot
+        requires. The bot's real deps (`playwright==1.44.0`, `python-telegram-bot`) live in a
+        *separate* `requirements.txt` at the repo root, and **no venv exists yet for it** anywhere
+        in the clone. Needs a new venv built + `playwright install` for the browser binary before
+        the bot can run under the clone at all — a setup step, not a unit edit.
+   - **Session file is fine:** clone's `amazon_session.json` (5589 bytes, copied 2026-07-03 09:33
+     in Phase 2) confirmed current — root's copy is unchanged since 2026-06-15 (same 5589 bytes),
+     so nothing has drifted since the Phase 2 migration.
+   - **Proposed fix (not applied — awaiting go-ahead):**
+     ```ini
+     [Service]
+     User=root
+     WorkingDirectory=/home/jobizi/ebay-arbitrage
+     ExecStart=/home/jobizi/ebay-arbitrage/<NEW-BOT-VENV>/bin/python fulfillment_bot.py
+     EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env
+     ```
+     (`Restart=always`, `RestartSec=10`, `[Install]` unchanged.) `<NEW-BOT-VENV>` needs to be built
+     first from the repo-root `requirements.txt`. Suggested order: build venv → test bot standalone
+     (not via systemd) against a spare/dry-run path → then repoint+enable the unit, mirroring the
+     test-before-cutover approach used for the API.
+   - **`deploy/arbitrage-telegram-approver.service:8,9,12`** (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 7 below) happens; not investigated this round.
 2. **Phase 1 — build clone `.env`.** Seed from old prod `.env` (carries eBay creds without printing).
    Decisions: `DRY_RUN=true` (explicit), drop `EBAY_FEE_PCT` (dead), `FULFILLMENT_QUEUE`=absolute
    clone path, `ENABLE_DOCS=false`, **no Telegram vars this round** (API-first). Fill `API_KEYS` and
@@ -101,11 +138,9 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
    (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
    install/enable. **Not started this round (API-only cutover, by design).**
 
-**Still open and now more time-sensitive since the API is live from the clone:** item 1's
-runtime-critical repoints (`fulfillment_bot.py` `SESSION_FILE`/`DEBUG_DIR` hardcoded to
-`/root/arbitrage-api`) were **not** touched by the Phase 4 cutover (that was unit-file only, as
-scoped). If/when the fulfillment bot is run, it will still read/write `/root` paths, not the
-clone — worth resolving before relying on the bot against the now-live clone-backed API.
+**Still open:** fulfillment bot repointing — see the full 2026-07-03 investigation under item 1
+above. Not just an env-var fix (missing venv + wrong `WorkingDirectory` for the clone's layout);
+proposed unit diff is there, not yet applied.
 
 ## Rollback (keep ready)
 Restore `~/arbitrage-api.service.bak-2026-07-03` → `sudo systemctl daemon-reload` → `sudo systemctl
