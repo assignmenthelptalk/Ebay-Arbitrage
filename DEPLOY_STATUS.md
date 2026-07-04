@@ -16,6 +16,9 @@ Two copies of the app on the VPS (13.140.171.246):
 Phase 4 (cutover) is complete and verified. API-only — Telegram approver not yet repointed/started
 (separate later step, item 8 below).
 
+Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
+Service is intentionally left **disabled/inactive** — repointed but not turned on.
+
 ## Done
 - Auth: `auth.py` — API-key via `X-API-Key`, fails closed on empty `API_KEYS`, `compare_digest`.
 - Human-in-the-loop gate: `fulfillment_gate.py` — pending_review → approve(ceiling) → bot claims →
@@ -72,6 +75,50 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
   - `/root/arbitrage-api` left in place, untouched, as the rollback target (rollback command is in
     the Rollback section below, using `~/arbitrage-api.service.bak-2026-07-03`).
   - Not pushed to origin. Telegram approver not started. `DRY_RUN`/`EBAY_ENV` not flipped.
+- **Phase 4b — DONE (2026-07-04).** Fulfillment bot venv built + `fulfillment-bot.service`
+  repointed to the clone. Bot itself left **disabled** — repoint only, no auto-start.
+  - **Venv:** new `.venv-bot` at repo root (`/home/jobizi/ebay-arbitrage/.venv-bot`), separate from
+    `arbitrage-api/.venv`. Built from repo-root `requirements.txt`
+    (`playwright==1.44.0`, `python-telegram-bot>=20,<22`) + `playwright install chromium`
+    (browser binary confirmed on disk, `sync_playwright` import verified).
+  - **Two deps the bot imports but `requirements.txt` never declared**, found when the standalone
+    test crashed with `ModuleNotFoundError: No module named 'requests'`: `requests` and
+    `python-dotenv` (`from dotenv import load_dotenv`). Installed into `.venv-bot`
+    (`requests==2.34.2`, `python-dotenv==1.2.2`), then added to `requirements.txt` at those exact
+    pins so the next clone/venv doesn't hit the same gap. No other pins touched.
+  - **Standalone dry-run test** (`.venv-bot/bin/python -u fulfillment_bot.py`, NOT via systemd, run
+    by hand with the clone's `.env` sourced, `timeout 30`): started clean, no import errors, printed
+    `[bot] Fulfillment bot started (DRY RUN — no real purchases)` /
+    `Polling every 60s` / `[queue] No approved jobs — sleeping 60s`, then killed by `timeout`
+    (exit 124 — expected). Queue was empty so it correctly idled — no Amazon navigation, no
+    purchase attempt, no screenshots. `arbitrage-api/fulfillment_queue.json` mtime updated
+    (read/rewrite-in-place) but content byte-identical (`{"jobs": [], "spend": {}}`). User
+    independently confirmed via `sudo find /root -newermt "-30 minutes" -type f` → nothing —
+    no stray writes under `/root`.
+    - Caveat noted during testing: Python stdout buffers when not a tty, so a plain (non `-u`) run
+      under `timeout` can look silent even on success — use `-u` (or expect buffered output lost)
+      when re-testing by hand in future sessions.
+  - **Unit repointed.** Old unit was fully `/root`-consistent (`WorkingDirectory`, `ExecStart`,
+    `EnvironmentFile` all under `/root/arbitrage-api`). Backed up
+    (`~/fulfillment-bot.service.bak-2026-07-04`), diff reviewed and approved before applying — only
+    these three lines changed:
+    ```ini
+    WorkingDirectory=/home/jobizi/ebay-arbitrage
+    ExecStart=/home/jobizi/ebay-arbitrage/.venv-bot/bin/python fulfillment_bot.py
+    EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env
+    ```
+    `User=root`, `Restart=always`, `RestartSec=10`, `After=network.target arbitrage-api.service`,
+    `[Install]` all left identical. `daemon-reload` run. Confirmed **`disabled`/`inactive`** both
+    before and after — repointing a unit does not change its enable state; it stays off until
+    someone explicitly runs `sudo systemctl enable` + `start`.
+  - **Not done yet (deliberately out of scope this round):**
+    - Bot has **not** been enabled or started — still fully manual/off. Session file
+      (`amazon_session.json`) is from 2026-07-03/the Phase 2 migration and will be ~a month old by
+      the time anyone actually enables the bot — run `setup_session.py` for a fresh login before
+      flipping it on, don't assume the session is still valid.
+    - Telegram approver (`deploy/arbitrage-telegram-approver.service`) not repointed/installed —
+      separate step, but it can reuse `.venv-bot` as-is: `python-telegram-bot==21.11.1` is already
+      installed there (confirmed via `pip install -r requirements.txt`), no second venv needed.
 1. **Repoint hardcoded `/root` paths.** Scanned the whole clone
    (`grep -rn "/root/arbitrage-api\|/root/" ...`). Make these env-driven (read from `.env`) rather
    than hardcoding the new clone path, so this doesn't recur on the next move.
@@ -116,26 +163,10 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
      (same 5589 bytes), so nothing has drifted since the Phase 2 migration. Session is ~3 weeks old
      as of 2026-07-03; may need a fresh `setup_session.py` login when the bot is next actually run
      — not a blocker now, just don't assume it's still valid by the time repointing happens.
-   - **PENDING TASK (not done — next deliberate session): repoint the bot to the clone.** Requires,
-     in order:
-     1. Build a repo-root venv from `/home/jobizi/ebay-arbitrage/requirements.txt`
-        (`playwright==1.44.0` + `playwright install <browser>`, `python-telegram-bot`).
-     2. Repoint `fulfillment-bot.service`: `WorkingDirectory=/home/jobizi/ebay-arbitrage`,
-        `ExecStart=<repo-root-venv>/bin/python fulfillment_bot.py`,
-        `EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env`.
-     3. Test-run manually (not via systemd) before re-enabling.
-     4. Bundle with the Telegram approver setup — same repo-root venv already has
-        `python-telegram-bot`, so do both together rather than building the venv twice.
-     5. Only `sudo systemctl enable` it again after the manual test passes.
-     Proposed unit diff (not applied):
-     ```ini
-     [Service]
-     User=root
-     WorkingDirectory=/home/jobizi/ebay-arbitrage
-     ExecStart=/home/jobizi/ebay-arbitrage/<NEW-BOT-VENV>/bin/python fulfillment_bot.py
-     EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env
-     ```
-     (`Restart=always`, `RestartSec=10`, `[Install]` unchanged.)
+   - **DONE (2026-07-04) — see Phase 4b above.** Venv built (`.venv-bot`), unit repointed and
+     applied, standalone dry-run test passed, service confirmed left **disabled/inactive**. Still
+     remaining: actually enable/start it (fresh `setup_session.py` login first — session is aging),
+     and the Telegram approver step (can reuse `.venv-bot`).
    - **`deploy/arbitrage-telegram-approver.service:8,9,12`** (`WorkingDirectory`/`ExecStart`/`EnvironmentFile`) — repoint when the Telegram step (item 7 below) happens; not investigated this round. Bundle with the bot venv work per step 4 above.
    - **Remaining deploy tasks, in short:** (1) fulfillment bot venv + repoint, (2) Telegram
      approver setup — both bundled together per above. Everything required before flipping
@@ -167,9 +198,8 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
    (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
    install/enable. **Not started this round (API-only cutover, by design).**
 
-**Still open:** fulfillment bot repointing — see the full 2026-07-03 investigation under item 1
-above. Not just an env-var fix (missing venv + wrong `WorkingDirectory` for the clone's layout);
-proposed unit diff is there, not yet applied.
+**Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
+**disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
 
 ## Rollback (keep ready)
 Restore `~/arbitrage-api.service.bak-2026-07-03` → `sudo systemctl daemon-reload` → `sudo systemctl
