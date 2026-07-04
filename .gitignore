@@ -23,3 +23,8 @@ diag_*.png
 # misc
 *.log
 .DS_Store
+
+# editor backup files
+*.save
+*.swp
+*~
