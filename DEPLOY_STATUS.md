@@ -14,7 +14,10 @@ Two copies of the app on the VPS (13.140.171.246):
   pushed** to origin.
 
 Phase 4 (cutover) is complete and verified. API-only — Telegram approver not yet repointed/started
-(separate later step, item 8 below).
+(separate later step, item 7 below).
+
+Phase 5 (2026-07-07): eBay sandbox user token stored and verified live against the Sell Fulfillment
+API — seller-scoped auth confirmed working end-to-end. See item 8 below.
 
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
@@ -197,9 +200,43 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
 7. **Telegram approver** — separate step after API confirmed healthy: repoint its unit
    (`deploy/arbitrage-telegram-approver.service` — see item 1) to clone paths, set TELEGRAM_* vars,
    install/enable. **Not started this round (API-only cutover, by design).**
+8. **Phase 5 — DONE (2026-07-07).** eBay sandbox user token stored and verified against a live
+   seller-scoped call. `sell.analytics.readonly` added to `_SELL_SCOPES` in `auth.py`
+   (commit `004b294`). `arbitrage-api.service` restarted from the clone, confirmed
+   `active (running)` (PID 632127) — no code/unit changes this round, restart only.
+   - **Token stored** via `POST /auth/ebay/user-token` (`auth.py:182-209`) — upserts
+     `Token(client_id="user_token", ...)`, no RuName/redirect needed. User ran the `curl` themselves
+     with the real token; response confirmed success without the token ever appearing in chat/logs.
+   - **DB row verified** directly (`tokens` table, `client_id="user_token"`): present, correct
+     `expires_at`, token value structurally sane (correct `v^1.1#...` prefix, no
+     whitespace/quote/backslash corruption from the curl round-trip).
+   - **First token attempt failed live**: direct `GET /sell/fulfillment/v1/order` (sandbox) with the
+     stored token → **401 "Invalid access token"**. Not a scope error — eBay rejected the token
+     outright. Root cause: **keyset mismatch** — the sandbox portal's token tool must match the app
+     whose `EBAY_CLIENT_ID` is in `.env`, or eBay rejects an otherwise well-formed token. User
+     re-minted against the correct app and re-ran the store curl.
+   - **Second token attempt passed**: same direct fulfillment-order call → **200**,
+     `{"total":0,"orders":[]}` — empty is correct for a fresh sandbox account. **This is the proof
+     that token + `sell.analytics.readonly` scope + seller auth path all work end-to-end.**
+   - **Important caveat discovered**: `GET /orders/pending` (the app's own endpoint) is **not** a
+     valid way to test this — `orders.py:119-120` catches `(httpx.HTTPStatusError, HTTPException)`
+     from the eBay call and silently falls back to the SQLite cache, always returning 200 regardless
+     of whether the underlying eBay call 401'd. No `log_event` on that path either. If a future
+     session needs to verify live eBay auth, call eBay's API directly (or add logging to that
+     except block) — don't trust `/orders/pending`'s status code alone.
+   - **`getTrafficReport` (`GET /sell/analytics/v1/traffic_report`, sandbox) → 404, empty body.**
+     Ran with the same (working) token, `dimension=DAY`,
+     `filter=marketplace_ids:{EBAY_US},dimension_key:LISTING`. Treated as **expected sandbox
+     behavior** (no error payload, unlike the earlier real 401) — eBay's Analytics API has limited/no
+     data infrastructure in sandbox, so a 404 here does not indicate a token or scope problem. The
+     fulfillment-order 200 above is the authoritative proof that auth works; this 404 is a sandbox
+     platform limitation, not a regression to chase.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
+Production go-live additionally needs: production keyset (separate from the sandbox app used here),
+a real US seller account, and a registered RuName/HTTPS callback for the production OAuth handshake
+(see go-live checklist below) — none of that is touched by this session's sandbox work.
 
 ## Rollback (keep ready)
 Restore `~/arbitrage-api.service.bak-2026-07-03` → `sudo systemctl daemon-reload` → `sudo systemctl
