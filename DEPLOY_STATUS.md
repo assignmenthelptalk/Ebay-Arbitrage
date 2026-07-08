@@ -25,6 +25,12 @@ Stage 5 (2026-07-08): full-cost margin gate (`/research/margin`) added and verif
 Stage 6 (2026-07-08): candidates pipeline (intake + margin gate storage + list/detail/reevaluate)
 built and verified live, tests green, committed. See item 10 below. Not pushed.
 
+AI Product Scorer (§4A.3, 2026-07-08): 3-provider model layer (Anthropic/Kimi/OpenAI) + human-curated
+priors + cost-guarded scoring endpoints built, 43/43 tests green (all mocked, zero real API calls).
+Router wired into main.py. **No live provider call made yet** (deliberately deferred — no spend until
+requested) — treat all three adapters as mock-verified-only until a real key round-trips. See item 11
+below.
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -296,6 +302,56 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
       candidate data starts flowing.
     - **Not done:** not pushed to origin. AI-driven scoring/sourcing on top of this pipeline is
       explicitly out of scope for this round.
+11. **AI Product Scorer (§4A.3) — BUILT, MOCK-VERIFIED, NOT YET LIVE-VERIFIED (2026-07-08).**
+    OpenClaw was deliberately **not** used as a model gateway — recon (separate session) found it's
+    an agent gateway (every call runs the full agent/tool loop under full operator scope), not a
+    plain completion endpoint, so this scorer calls providers directly instead.
+    - **`services/model_providers.py`** — provider-agnostic layer. `ModelProvider` interface
+      (`async complete(system_prompt, user_content) -> dict`, parsed JSON only — the scorer never
+      touches a provider SDK). `_AnthropicMessagesProvider` shared base implements the Anthropic
+      Messages wire format; `AnthropicProvider` and `KimiProvider` both subclass it (same format,
+      different base_url/key/model). `OpenAIProvider` implements Chat Completions separately.
+      `get_provider()` factory reads `SCORER_PROVIDER`/`SCORER_MODEL` from `.env`. Defensive JSON
+      extraction (strips ``` fences / preamble before `json.loads`) raises a clear `ProviderError`
+      on unparseable output rather than returning garbage.
+    - **Kimi's exact shape confirmed from OpenClaw's own (separately running) config, not guessed:**
+      base URL `https://api.kimi.com/coding`, model id `kimi-for-coding`, speaks the Anthropic
+      Messages format. Cross-checked against OpenClaw's transport source, which appends `/v1/messages`
+      to the base — so the real wire endpoint is `https://api.kimi.com/coding/v1/messages`. This app
+      calls that endpoint directly; it does **not** route through OpenClaw's gateway process at all.
+    - **Two new tables** (`scores`, `scoring_priors`) added via the existing `init_db()`/`create_all`
+      mechanism. Confirmed additive: all 7 existing tables' row counts unchanged before/after
+      (orders=13, listings=1, competitor_listings=5, tokens=2, event_log=38, candidates=2,
+      margin_calc=3). Both new tables created empty.
+    - **`routers/scoring.py`** — `POST /candidates/{id}/score` (score one), `POST /scoring/run`
+      (cost-guarded batch: only `pending_review` candidates, skips any candidate that already has a
+      `Score` row unless `?force=true` — checked by row existence, not just status, so a
+      reevaluate-flip back to `pending_review` doesn't silently re-spend — caps at
+      `SCORING_BATCH_MAX`/default 25, oldest-first, overflow reported as `skipped` not dropped so
+      re-running drains the backlog), `GET/POST /scoring/priors`, `POST /scoring/priors/{id}/toggle`.
+      A dormant, clearly-commented `_suggest_priors_from_performance()` stub documents the future
+      `listing_performance` → human-approved-prior feedback loop; no logic, not wired anywhere.
+      Registered in `main.py` behind `dependencies=protected` (confirmed: app boots, full route
+      table includes all new endpoints).
+    - **43/43 tests pass** (20 pre-existing + 23 new across `tests/test_model_providers.py` and
+      `tests/test_scoring.py`), **all with the provider mocked** — a fake `httpx.AsyncClient`
+      standing in for the real one, zero real network calls, no key required. Covers: each adapter
+      parsing clean/fenced/preamble-wrapped JSON and raising `ProviderError` cleanly on malformed
+      output, missing key (verified no network attempt is even made), or HTTP error status; the
+      factory's provider selection and its error on an unknown provider name; the scorer storing a
+      `Score` row and flipping a candidate to `scored` on success vs. `scoring_failed` (candidate
+      not lost, no crash) on a provider error; active priors appearing in the prompt and inactive
+      ones being excluded (verified via distinct marker text); and all three `/scoring/run` cost
+      guards (rejected_margin skip, already-scored skip, batch cap with overflow reporting).
+      Real `arbitrage.db` confirmed byte-unchanged (mtime check) after the full suite.
+    - **Deliberately NOT done this round — no live provider call made.** All three adapters
+      (Anthropic, Kimi, OpenAI) are mock-tested only; none has round-tripped to a real API yet.
+      This was a deliberate choice to avoid spend before the operator explicitly signs off on a
+      live test. `.env` still has no real `KIMI_API_KEY`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` set.
+      **Do not treat Kimi (or any provider) as verified working end-to-end until a real key is
+      added, the service is restarted, and `POST /candidates/1/score` (or similar) actually returns
+      a real score — that step is still pending, by choice, not by failure.**
+    - **Not done:** not pushed to origin.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

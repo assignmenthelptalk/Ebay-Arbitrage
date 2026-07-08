@@ -116,6 +116,43 @@ class MarginCalc(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Score(Base):
+    """AI Product Scorer output (§4A.3). Multiple rows per candidate allowed
+    (re-scoring history) — the most recent row for a candidate is current."""
+
+    __tablename__ = "scores"
+
+    id = Column(Integer, primary_key=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=False, index=True)
+
+    should_list = Column(Boolean, nullable=False)
+    risk_level = Column(String, nullable=False)  # low | med | high
+    confidence = Column(String, nullable=False)  # low | med | high (or numeric 0-1 as string)
+    reason = Column(Text, nullable=False)
+
+    # No competition data wired yet (Browse-API integration is future work) —
+    # stays null until that's connected. See routers/scoring.py prompt notes.
+    competition_score = Column(Float, nullable=True)
+
+    provider = Column(String, nullable=False)  # anthropic | kimi | openai
+    model = Column(String, nullable=False)
+    raw_response = Column(Text)  # full raw provider reply, for debugging
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ScoringPrior(Base):
+    """Human-curated heuristic injected into every scoring prompt while
+    active (e.g. "avoid branded electronics — high return risk")."""
+
+    __tablename__ = "scoring_priors"
+
+    id = Column(Integer, primary_key=True)
+    prior_text = Column(Text, nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 
