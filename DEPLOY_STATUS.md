@@ -25,11 +25,12 @@ Stage 5 (2026-07-08): full-cost margin gate (`/research/margin`) added and verif
 Stage 6 (2026-07-08): candidates pipeline (intake + margin gate storage + list/detail/reevaluate)
 built and verified live, tests green, committed. See item 10 below. Not pushed.
 
-AI Product Scorer (§4A.3, 2026-07-08): 3-provider model layer (Anthropic/Kimi/OpenAI) + human-curated
-priors + cost-guarded scoring endpoints built, 43/43 tests green (all mocked, zero real API calls).
-Router wired into main.py. **No live provider call made yet** (deliberately deferred — no spend until
-requested) — treat all three adapters as mock-verified-only until a real key round-trips. See item 11
-below.
+AI Product Scorer (§4A.3, 2026-07-08): 4-provider model layer (Anthropic/Kimi/OpenAI/Mock) +
+human-curated priors + cost-guarded scoring endpoints built, 46/46 tests green. **Live-verified
+end-to-end at zero spend via `SCORER_PROVIDER=mock`** — real intake → margin gate → score → stored
+`scores` row, over the actual running service, no external call. The 3 real providers (Anthropic,
+Kimi, OpenAI) remain mock-tested-only — no live call made yet, deliberately deferred until spend is
+explicitly requested. See item 11 below.
 
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
@@ -351,6 +352,26 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
       **Do not treat Kimi (or any provider) as verified working end-to-end until a real key is
       added, the service is restarted, and `POST /candidates/1/score` (or similar) actually returns
       a real score — that step is still pending, by choice, not by failure.**
+    - **MockProvider added (2026-07-08, same day) — pipeline now exercisable end-to-end for free.**
+      A 4th adapter, `MockProvider`, returns a fixed plausible score
+      (`should_list=true, risk_level="low", confidence="med", competition_score=null`, reason
+      self-identifies as `"MOCK score — no model was called"`) with **no HTTP call and no API key**.
+      Selectable via `SCORER_PROVIDER=mock`. Registered in `get_provider()` alongside the 3 real
+      adapters; real adapters untouched. 3 new tests (46/46 total): factory selects `MockProvider`
+      for `SCORER_PROVIDER=mock`; `complete()` returns the exact schema with `httpx.AsyncClient`
+      patched to explode if touched (proves zero network); and a scorer test that goes through the
+      **real** `get_provider()` factory (not the usual per-test fake) to prove the actual
+      `mock` wiring works, not just that the scorer tolerates an arbitrary stand-in.
+      - **Live-verified on the real service (2026-07-08):** `.env` set to `SCORER_PROVIDER=mock`
+        (no real keys), service restarted, then exercised live: `POST /candidates/1/score` returned
+        the mock score and flipped candidate 1 to `scored`; `POST /scoring/run` scored candidate 2
+        via mock and correctly skipped candidate 1 (already had a `scores` row) —
+        `scored_count=1, skipped_count=1, failed_count=0`. Confirms the full live path (endpoint →
+        scorer → provider factory → parse → store → status flip → cost-guard skip logic) end-to-end
+        with zero spend.
+      - **To go live with a real provider later:** it's a `.env` change only —
+        `SCORER_PROVIDER=kimi` (or `anthropic`/`openai`) + the matching API key + restart. No code
+        change needed. Switch back to `mock` any time to keep demoing/testing for free.
     - **Not done:** not pushed to origin.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left

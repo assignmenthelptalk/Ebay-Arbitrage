@@ -197,10 +197,35 @@ class OpenAIProvider(ModelProvider):
         return _extract_json(raw_text)
 
 
+class MockProvider(ModelProvider):
+    """Dev convenience — returns a fixed, plausible score with NO network
+    call and NO API key required. Select with SCORER_PROVIDER=mock to run
+    the full intake -> margin gate -> score pipeline for free (demos, local
+    dev, exercising the live HTTP path without spending on a real provider).
+
+    Not a test double for provider-parsing correctness (see
+    test_model_providers.py for that) — this is for running the app itself
+    with zero spend.
+    """
+
+    def __init__(self, model: str = "mock", **kwargs):
+        self.model = model
+
+    async def complete(self, system_prompt: str, user_content: str) -> dict:
+        return {
+            "should_list": True,
+            "risk_level": "low",
+            "confidence": "med",
+            "reason": "MOCK score — no model was called (SCORER_PROVIDER=mock).",
+            "competition_score": None,
+        }
+
+
 _PROVIDERS = {
     "anthropic": AnthropicProvider,
     "kimi": KimiProvider,
     "openai": OpenAIProvider,
+    "mock": MockProvider,
 }
 
 

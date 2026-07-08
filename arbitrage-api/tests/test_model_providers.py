@@ -189,3 +189,29 @@ def test_get_provider_unknown_name_raises(monkeypatch):
     monkeypatch.setenv("SCORER_PROVIDER", "not-a-real-provider")
     with pytest.raises(mp.ProviderError):
         mp.get_provider()
+
+
+# --- Mock provider (zero-spend dev convenience) ---
+
+
+def test_get_provider_selects_mock(monkeypatch):
+    monkeypatch.setenv("SCORER_PROVIDER", "mock")
+    monkeypatch.delenv("SCORER_MODEL", raising=False)
+    provider = mp.get_provider()
+    assert isinstance(provider, mp.MockProvider)
+
+
+def test_mock_provider_returns_expected_schema_with_no_network_call(monkeypatch):
+    def _explode(*a, **kw):
+        raise AssertionError("MockProvider must never touch httpx.AsyncClient")
+
+    monkeypatch.setattr(mp.httpx, "AsyncClient", _explode)
+
+    provider = mp.MockProvider()
+    result = _run(provider.complete("sys", "user"))
+
+    assert set(result) == {"should_list", "risk_level", "confidence", "reason", "competition_score"}
+    assert result["should_list"] is True
+    assert result["risk_level"] == "low"
+    assert result["competition_score"] is None
+    assert "MOCK" in result["reason"]

@@ -117,6 +117,29 @@ def test_score_one_candidate_stores_score_and_flips_status(client, monkeypatch):
     assert detail["status"] == "scored"
 
 
+def test_score_one_candidate_with_real_mock_provider_end_to_end(client, monkeypatch):
+    """Uses the REAL get_provider() factory (not the _FakeProvider stand-in
+    used elsewhere in this file) with SCORER_PROVIDER=mock, so this proves
+    the actual factory -> MockProvider -> scorer wiring works, not just that
+    the scorer behaves given an arbitrary fake."""
+    monkeypatch.setenv("SCORER_PROVIDER", "mock")
+    monkeypatch.delenv("SCORER_MODEL", raising=False)
+
+    candidate_id = _make_passing_candidate(client)
+
+    resp = client.post(f"/candidates/{candidate_id}/score", headers=HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["should_list"] is True
+    assert data["risk_level"] == "low"
+    assert data["provider"] == "mock"
+    assert data["model"] == "mock"
+    assert "MOCK" in data["reason"]
+
+    detail = client.get(f"/candidates/{candidate_id}", headers=HEADERS).json()
+    assert detail["status"] == "scored"
+
+
 def test_score_one_candidate_provider_error_flips_scoring_failed(client, monkeypatch):
     candidate_id = _make_passing_candidate(client)
     fake = _FakeProvider(error=ProviderError("simulated upstream failure"))
