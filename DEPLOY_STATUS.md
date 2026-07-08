@@ -19,6 +19,9 @@ Phase 4 (cutover) is complete and verified. API-only — Telegram approver not y
 Phase 5 (2026-07-07): eBay sandbox user token stored and verified live against the Sell Fulfillment
 API — seller-scoped auth confirmed working end-to-end. See item 8 below.
 
+Stage 5 (2026-07-08): full-cost margin gate (`/research/margin`) added and verified live at
+0.20/$5.00 thresholds. Committed `4aa5e5c`. See item 9 below. Not pushed.
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -231,6 +234,39 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
      data infrastructure in sandbox, so a 404 here does not indicate a token or scope problem. The
      fulfillment-order 200 above is the authoritative proof that auth works; this 404 is a sandbox
      platform limitation, not a regression to chase.
+9. **Stage 5 — DONE (2026-07-08).** Full-cost margin gate (§4A.2): `evaluate_margin()` in
+   `services/margin_engine.py` + new `POST /research/margin` endpoint (`routers/research.py`,
+   registered in `main.py`, behind the same `X-API-Key` dependency as the other routers).
+   Committed `4aa5e5c`. **Not pushed.**
+   - **What it does:** takes `sale_price`/`amazon_cost`, computes eBay fee, Promoted Listings fee,
+     payment FX fee, and expected-return cost, then gates on both `MIN_NET_MARGIN_PCT` (≥0.20) and
+     `MIN_NET_PROFIT_ABS` (≥$5.00). Returns the full breakdown plus `fail_reasons` so callers can see
+     exactly which threshold(s) failed.
+   - **Bug caught and fixed this round:** the live server was echoing stale defaults
+     (`min_net_margin_pct: 0.15`, `min_net_profit_abs: 3.0`) even though `margin_engine.py` and
+     `.env.example` on disk already had the agreed 0.20/5.00. Root cause: `margin_engine.py` was
+     edited (mtime 03:14:13) **after** `arbitrage-api.service` last started (03:11:28) — the running
+     uvicorn process had the old module loaded in memory; Python doesn't hot-reload edited source
+     without a restart. Fixed by `sudo systemctl restart arbitrage-api.service`. Lesson: always
+     restart after editing a module the live service has already imported, and verify by reading the
+     values *back* from a live response, not just trusting the code on disk.
+   - **`EBAY_FEE_PCT` is no longer dead** (see the "Facts worth not re-discovering" note below,
+     which now needs an update) — it's wired via `os.getenv` as of this commit, default `0.1325`,
+     matching the real-world fee assumption. `.env.example` documents this explicitly.
+   - **Live-verified post-restart**, both cases:
+     - `$50 sale / $20 cost` → echoes `min_net_margin_pct: 0.20`, `min_net_profit_abs: 5.0`,
+       `passed: true`.
+     - `$25 sale / $18 cost` (the threshold-exercising case, not the comfortable one) → `passed:
+       false`, net profit ~$1.75, fails both `MIN_NET_MARGIN_PCT` and `MIN_NET_PROFIT_ABS` with
+       clear `fail_reasons` text naming each.
+   - **12 unit tests** (`tests/test_margin_engine.py`, run via new `requirements-dev.txt`
+     `-r requirements.txt` + `pytest==9.1.1`): boundary conditions (exactly-at-threshold passes,
+     just-below fails) for both gates independently, zero/negative `sale_price` guards (no
+     ZeroDivisionError), high-return-rate wipeout case, and a hand-computed config-override case.
+     All 12 pass (`0.43s`).
+   - **Not done:** not pushed to origin; real `.env` does not set `MIN_NET_MARGIN_PCT` /
+     `MIN_NET_PROFIT_ABS` / `EBAY_FEE_PCT` (relies on code defaults, which now match) — see item
+     below on whether to add them explicitly.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
@@ -263,8 +299,10 @@ None of these block the sandbox cutover; all matter before autonomous real purch
       exceptions.
 
 ## Facts worth not re-discovering
-- Old→new `.env`: 9 of 10 keys carry over; `EBAY_FEE_PCT` is dead (hardcoded 0.1325 in
-  margin_engine.py — note fee assumption changed from .14 to .1325).
+- Old→new `.env`: 9 of 10 keys carry over. `EBAY_FEE_PCT` **was** dead (hardcoded 0.1325 in
+  margin_engine.py) but is now live as of Stage 5 (2026-07-08, commit `4aa5e5c`) — wired via
+  `os.getenv`, default still `0.1325`. Set it explicitly in `.env` if you want a value other than
+  the default; it's silently ignored no longer.
 - `QUEUE_POLL_INTERVAL` (bot) and `POLL_INTERVAL` (telegram) are INDEPENDENT, not a rename — both
   needed if both run. Same for `MAX_PRICE_DRIFT_PCT` (bot % drift check) vs the gate's dollar caps.
 - `BOT_API_KEY` must be a value that also appears in `API_KEYS`.
