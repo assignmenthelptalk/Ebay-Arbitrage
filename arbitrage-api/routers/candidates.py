@@ -1,0 +1,200 @@
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from database import get_db
+from models import Candidate, MarginCalc
+from services import margin_engine
+
+router = APIRouter(prefix="/candidates", tags=["candidates"])
+
+VALID_SOURCES = {"zik", "browse_auto", "manual_amazon", "manual_csv", "manual_form"}
+
+
+class IntakeRequest(BaseModel):
+    source: str
+    sale_price: float
+    amazon_cost: float
+    asin: Optional[str] = None
+    title: Optional[str] = None
+
+
+class ReevaluateRequest(BaseModel):
+    amazon_cost: float
+    sale_price: Optional[float] = None
+
+
+def _margin_calc_to_dict(m: MarginCalc) -> dict:
+    return {
+        "id": m.id,
+        "sale_price": m.sale_price,
+        "amazon_cost": m.amazon_cost,
+        "ebay_fee_pct": m.ebay_fee_pct,
+        "promoted_listings_pct": m.promoted_listings_pct,
+        "payment_fx_pct": m.payment_fx_pct,
+        "expected_return_rate": m.expected_return_rate,
+        "return_shipping_loss": m.return_shipping_loss,
+        "min_net_margin_pct": m.min_net_margin_pct,
+        "min_net_profit_abs": m.min_net_profit_abs,
+        "ebay_fee": m.ebay_fee,
+        "ads_fee": m.ads_fee,
+        "fx_fee": m.fx_fee,
+        "returns_cost": m.returns_cost,
+        "net_profit": m.net_profit,
+        "margin_pct": m.margin_pct,
+        "passed": m.passed,
+        "fail_reasons": m.fail_reasons,
+        "reason": m.reason,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+def _candidate_to_dict(c: Candidate, latest_margin: Optional[MarginCalc] = None) -> dict:
+    return {
+        "id": c.id,
+        "source": c.source,
+        "asin": c.asin,
+        "title": c.title,
+        "sale_price": c.sale_price,
+        "amazon_cost": c.amazon_cost,
+        "status": c.status,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        "margin": _margin_calc_to_dict(latest_margin) if latest_margin else None,
+    }
+
+
+def _latest_margin(db: Session, candidate_id: int) -> Optional[MarginCalc]:
+    return (
+        db.query(MarginCalc)
+        .filter(MarginCalc.candidate_id == candidate_id)
+        .order_by(MarginCalc.created_at.desc())
+        .first()
+    )
+
+
+def _get_candidate_or_404(db: Session, candidate_id: int) -> Candidate:
+    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": True, "message": "Candidate not found", "code": 404},
+        )
+    return candidate
+
+
+def _run_margin_and_store(db: Session, candidate: Candidate, sale_price: float, amazon_cost: float) -> MarginCalc:
+    result = margin_engine.evaluate_margin(sale_price, amazon_cost)
+
+    margin_calc = MarginCalc(
+        candidate_id=candidate.id,
+        sale_price=result.sale_price,
+        amazon_cost=result.amazon_cost,
+        ebay_fee_pct=result.ebay_fee_pct,
+        promoted_listings_pct=result.promoted_listings_pct,
+        payment_fx_pct=result.payment_fx_pct,
+        expected_return_rate=result.expected_return_rate,
+        return_shipping_loss=result.return_shipping_loss,
+        min_net_margin_pct=result.min_net_margin_pct,
+        min_net_profit_abs=result.min_net_profit_abs,
+        ebay_fee=result.ebay_fee,
+        ads_fee=result.ads_fee,
+        fx_fee=result.fx_fee,
+        returns_cost=result.returns_cost,
+        net_profit=result.net_profit,
+        margin_pct=result.margin_pct,
+        passed=result.passed,
+        fail_reasons=result.fail_reasons,
+        reason=result.reason,
+    )
+    db.add(margin_calc)
+
+    candidate.status = "pending_review" if result.passed else "rejected_margin"
+    candidate.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(candidate)
+    db.refresh(margin_calc)
+    return margin_calc
+
+
+@router.post("")
+def intake_candidate(payload: IntakeRequest, db: Session = Depends(get_db)):
+    if payload.source not in VALID_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": True, "message": f"source must be one of {sorted(VALID_SOURCES)}", "code": 400},
+        )
+
+    candidate = Candidate(
+        source=payload.source,
+        asin=payload.asin,
+        title=payload.title,
+        sale_price=payload.sale_price,
+        amazon_cost=payload.amazon_cost,
+        status="pending_review",
+    )
+    db.add(candidate)
+    db.commit()
+    db.refresh(candidate)
+
+    margin_calc = _run_margin_and_store(db, candidate, payload.sale_price, payload.amazon_cost)
+
+    return _candidate_to_dict(candidate, margin_calc)
+
+
+@router.get("")
+def list_candidates(
+    db: Session = Depends(get_db),
+    status: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    q = db.query(Candidate)
+    if status:
+        q = q.filter(Candidate.status == status)
+    if source:
+        q = q.filter(Candidate.source == source)
+
+    total = q.count()
+    candidates = q.order_by(Candidate.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "candidates": [_candidate_to_dict(c, _latest_margin(db, c.id)) for c in candidates],
+    }
+
+
+@router.get("/{candidate_id}")
+def get_candidate(candidate_id: int, db: Session = Depends(get_db)):
+    candidate = _get_candidate_or_404(db, candidate_id)
+
+    history = (
+        db.query(MarginCalc)
+        .filter(MarginCalc.candidate_id == candidate_id)
+        .order_by(MarginCalc.created_at.desc())
+        .all()
+    )
+
+    data = _candidate_to_dict(candidate, history[0] if history else None)
+    data["margin_history"] = [_margin_calc_to_dict(m) for m in history]
+    return data
+
+
+@router.post("/{candidate_id}/reevaluate")
+def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Session = Depends(get_db)):
+    candidate = _get_candidate_or_404(db, candidate_id)
+
+    candidate.amazon_cost = payload.amazon_cost
+    if payload.sale_price is not None:
+        candidate.sale_price = payload.sale_price
+
+    margin_calc = _run_margin_and_store(db, candidate, candidate.sale_price, candidate.amazon_cost)
+
+    return _candidate_to_dict(candidate, margin_calc)

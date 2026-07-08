@@ -22,6 +22,9 @@ API — seller-scoped auth confirmed working end-to-end. See item 8 below.
 Stage 5 (2026-07-08): full-cost margin gate (`/research/margin`) added and verified live at
 0.20/$5.00 thresholds. Committed `4aa5e5c`. See item 9 below. Not pushed.
 
+Stage 6 (2026-07-08): candidates pipeline (intake + margin gate storage + list/detail/reevaluate)
+built and verified live, tests green, committed. See item 10 below. Not pushed.
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -267,6 +270,32 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
    - **Not done:** not pushed to origin; real `.env` does not set `MIN_NET_MARGIN_PCT` /
      `MIN_NET_PROFIT_ABS` / `EBAY_FEE_PCT` (relies on code defaults, which now match) — see item
      below on whether to add them explicitly.
+10. **Stage 6 — DONE (2026-07-08).** Candidates pipeline: two new tables (`candidates`,
+    `margin_calc`) added via the existing `init_db()`/`create_all` mechanism; existing tables
+    (`orders`/`listings`/`competitor_listings`/`tokens`/`event_log`) confirmed untouched.
+    `routers/candidates.py`, registered in `main.py` behind the same `X-API-Key` dependency as the
+    other routers:
+    - `POST /candidates` — intake, always runs `evaluate_margin` and always stores the row
+      (`pending_review` on pass, `rejected_margin` on fail — rejects are kept, not dropped).
+    - `GET /candidates` — filter by `status`/`source`, newest-first, limit/offset.
+    - `GET /candidates/{id}` — detail + full `margin_history` (every `margin_calc` row for that
+      candidate).
+    - `POST /candidates/{id}/reevaluate` — updates cost, re-runs margin via the shared
+      `_run_margin_and_store`, appends a new `margin_calc` row (old rows kept as history), flips
+      status accordingly.
+    - **6 new tests** (`tests/test_candidates.py`, 20 total in the suite now), isolated temp SQLite
+      DB — real `arbitrage.db` confirmed byte-identical before/after the test run.
+    - **Live-verified**: intake pass ($50/$20 → `pending_review`) and fail ($25/$18 →
+      `rejected_margin`, still stored, not discarded); list + `?status=rejected_margin` filter;
+      reevaluate flip (`rejected_margin` → `pending_review`, new `margin_calc` id 3 appended, prior
+      row retained as history). Margin records store the thresholds actually used (0.20/5.00/0.1325)
+      alongside each calc, not just the current config.
+    - **Two test candidates (Widget A/B) remain in the live `arbitrage.db`** as artifacts of this
+      verification pass (table counts: orders=13, listings=1, candidates=2 — confirmed unchanged
+      from expected). Harmless, but can be deleted later if a clean slate is wanted before real
+      candidate data starts flowing.
+    - **Not done:** not pushed to origin. AI-driven scoring/sourcing on top of this pipeline is
+      explicitly out of scope for this round.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from database import Base
 
@@ -67,6 +67,53 @@ class Order(Base):
     triggered_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Candidate(Base):
+    __tablename__ = "candidates"
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String, nullable=False)  # zik | browse_auto | manual_amazon | manual_csv | manual_form
+    asin = Column(String)
+    title = Column(String)
+    sale_price = Column(Float, nullable=False)
+    amazon_cost = Column(Float, nullable=False)
+    status = Column(String, default="pending_review", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MarginCalc(Base):
+    __tablename__ = "margin_calc"
+
+    id = Column(Integer, primary_key=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=False, index=True)
+
+    sale_price = Column(Float, nullable=False)
+    amazon_cost = Column(Float, nullable=False)
+
+    # Thresholds/config the result was judged against (§ evaluate_margin config).
+    ebay_fee_pct = Column(Float, nullable=False)
+    promoted_listings_pct = Column(Float, nullable=False)
+    payment_fx_pct = Column(Float, nullable=False)
+    expected_return_rate = Column(Float, nullable=False)
+    return_shipping_loss = Column(Float, nullable=False)
+    min_net_margin_pct = Column(Float, nullable=False)
+    min_net_profit_abs = Column(Float, nullable=False)
+
+    ebay_fee = Column(Float, nullable=False)
+    ads_fee = Column(Float, nullable=False)
+    fx_fee = Column(Float, nullable=False)
+    returns_cost = Column(Float, nullable=False)
+
+    net_profit = Column(Float, nullable=False)
+    margin_pct = Column(Float, nullable=False)
+
+    passed = Column(Boolean, nullable=False)
+    fail_reasons = Column(JSON, default=list)
+    reason = Column(String, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class EventLog(Base):
