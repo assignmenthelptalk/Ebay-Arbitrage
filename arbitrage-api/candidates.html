@@ -125,6 +125,43 @@ a.asin-link { color: var(--blue); text-decoration: none; }
 a.asin-link:hover { text-decoration: underline; }
 
 .pagination { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+
+.listing-wrap { min-width: 230px; max-width: 320px; }
+.listing-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+.listing-tag.ai { background: rgba(88,166,255,.15); color: #58a6ff; }
+.listing-tag.edited { background: rgba(210,153,34,.15); color: #d29922; }
+.listing-title { font-weight: 600; font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.listing-desc {
+  color: var(--muted); font-size: 11px; margin: 3px 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.listing-specs { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.listing-kw { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.listing-actions { display: flex; gap: 6px; margin-top: 8px; }
+.no-listing { color: var(--muted); font-style: italic; }
+
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: none; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-overlay.show { display: flex; }
+.modal {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 20px; width: 560px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+}
+.modal h3 { font-size: 14px; margin-bottom: 4px; }
+.modal .modal-sub { color: var(--muted); font-size: 11px; margin-bottom: 10px; }
+.modal label {
+  display: block; color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.4px; margin: 12px 0 4px;
+}
+.modal input[type=text], .modal textarea {
+  width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 10px;
+}
+.modal textarea { font-family: 'SF Mono', ui-monospace, monospace; font-size: 12px; resize: vertical; }
+.modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.modal-err { color: var(--red); font-size: 12px; margin-top: 8px; display: none; }
 </style>
 </head>
 <body>
@@ -163,10 +200,11 @@ a.asin-link:hover { text-decoration: underline; }
         <th>Amazon Cost</th>
         <th>Margin</th>
         <th>Score</th>
+        <th>Listing Draft</th>
         <th>Status</th>
         <th>Actions</th>
       </tr></thead>
-      <tbody id="t-candidates"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      <tbody id="t-candidates"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
     </table>
   </div>
 
@@ -176,6 +214,32 @@ a.asin-link:hover { text-decoration: underline; }
     <button class="btn" id="next-page" onclick="changePage(1)">Next →</button>
   </div>
 </main>
+
+<div class="modal-overlay" id="edit-overlay">
+  <div class="modal">
+    <h3>Edit Listing Draft</h3>
+    <div class="modal-sub">Saving marks this draft as human-edited.</div>
+
+    <label for="edit-title">Title</label>
+    <input type="text" id="edit-title">
+
+    <label for="edit-description">Description</label>
+    <textarea id="edit-description" rows="4"></textarea>
+
+    <label for="edit-specifics">Item Specifics (JSON object)</label>
+    <textarea id="edit-specifics" rows="4"></textarea>
+
+    <label for="edit-keywords">Keywords (comma-separated)</label>
+    <input type="text" id="edit-keywords">
+
+    <div class="modal-err" id="edit-err"></div>
+
+    <div class="modal-actions">
+      <button class="btn" onclick="closeEditModal()">Cancel</button>
+      <button class="btn btn-green" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -231,11 +295,11 @@ async function apiFetch(url, opts) {
   return r.json();
 }
 
-// POST helper that surfaces the API's structured `detail` message (e.g. the
-// 409 "cannot approve" reason) instead of a generic "HTTP 409".
-async function apiPost(url, body) {
+// POST/PUT helper that surfaces the API's structured `detail` message (e.g.
+// the 409 "cannot approve" reason) instead of a generic "HTTP 409".
+async function apiSend(url, body, method = 'POST') {
   const headers = { 'Content-Type': 'application/json', 'X-API-Key': getApiKey() };
-  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body ?? {}) });
+  const r = await fetch(url, { method, headers, body: JSON.stringify(body ?? {}) });
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 || r.status === 403) localStorage.removeItem('apiKey');
   if (!r.ok) {
@@ -273,6 +337,35 @@ function renderScore(s) {
   </div>`;
 }
 
+function renderListingCell(c) {
+  const l = c.listing;
+  if (!l) {
+    return `<div class="listing-wrap">
+      <span class="no-listing">no draft yet</span>
+      <div class="listing-actions"><button class="btn act-generate">Generate</button></div>
+    </div>`;
+  }
+
+  const stateTag = l.status === 'approved'
+    ? '<span class="badge b-approved">LOCKED</span>'
+    : (l.edited ? '<span class="listing-tag edited">EDITED</span>' : '<span class="listing-tag ai">AI DRAFT</span>');
+
+  const specs = Object.entries(l.item_specifics || {}).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(' · ');
+  const kw = (l.keywords || []).join(', ');
+
+  return `<div class="listing-wrap">
+    <div>${stateTag}</div>
+    <div class="listing-title" title="${esc(l.title)}">${esc(l.title)}</div>
+    <div class="listing-desc" title="${esc(l.description)}">${esc(l.description)}</div>
+    ${specs ? `<div class="listing-specs">${specs}</div>` : ''}
+    ${kw ? `<div class="listing-kw">kw: ${esc(kw)}</div>` : ''}
+    <div class="listing-actions">
+      <button class="btn act-generate">Regenerate</button>
+      <button class="btn act-edit">Edit</button>
+    </div>
+  </div>`;
+}
+
 function renderActions(c) {
   const canApprove = !['rejected', 'rejected_margin', 'scoring_failed'].includes(c.status);
   const asinLink = c.asin
@@ -306,6 +399,7 @@ function renderRow(c) {
     <td class="muted">${money(c.amazon_cost)}</td>
     <td>${renderMargin(c.margin)}</td>
     <td>${renderScore(c.score)}</td>
+    <td>${renderListingCell(c)}</td>
     <td>${badge(c.status)}</td>
     <td>${renderActions(c)}</td>
   `;
@@ -318,7 +412,7 @@ function renderRow(c) {
   tr.querySelector('.act-approve').onclick = async () => {
     lockRow(true);
     try {
-      await apiPost(`/candidates/${c.id}/approve`);
+      await apiSend(`/candidates/${c.id}/approve`);
       setMsg('Approved.', 'ok');
       setTimeout(load, 600);
     } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
@@ -327,7 +421,7 @@ function renderRow(c) {
   tr.querySelector('.act-reject').onclick = async () => {
     lockRow(true);
     try {
-      await apiPost(`/candidates/${c.id}/reject`, {});
+      await apiSend(`/candidates/${c.id}/reject`, {});
       setMsg('Rejected.', 'ok');
       setTimeout(load, 600);
     } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
@@ -339,13 +433,86 @@ function renderRow(c) {
     if (!(newCost > 0)) { setMsg('Enter a valid cost.', 'err'); return; }
     lockRow(true);
     try {
-      await apiPost(`/candidates/${c.id}/reevaluate`, { amazon_cost: newCost });
+      await apiSend(`/candidates/${c.id}/reevaluate`, { amazon_cost: newCost });
       setMsg('Re-evaluated.', 'ok');
       setTimeout(load, 600);
     } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
   };
 
+  const genBtn = tr.querySelector('.act-generate');
+  if (genBtn) {
+    genBtn.onclick = async () => {
+      lockRow(true);
+      const original = genBtn.textContent;
+      genBtn.textContent = 'Generating…';
+      try {
+        await apiSend(`/candidates/${c.id}/generate-listing`, {});
+        setMsg('Draft generated.', 'ok');
+        setTimeout(load, 600);
+      } catch (e) {
+        setMsg(e.message, 'err');
+        genBtn.textContent = original;
+        lockRow(false);
+      }
+    };
+  }
+
+  const editBtn = tr.querySelector('.act-edit');
+  if (editBtn) {
+    editBtn.onclick = () => openEditModal(c.listing);
+  }
+
   return tr;
+}
+
+let editingListingId = null;
+
+function openEditModal(listing) {
+  editingListingId = listing.id;
+  document.getElementById('edit-title').value = listing.title || '';
+  document.getElementById('edit-description').value = listing.description || '';
+  document.getElementById('edit-specifics').value = JSON.stringify(listing.item_specifics || {}, null, 2);
+  document.getElementById('edit-keywords').value = (listing.keywords || []).join(', ');
+  document.getElementById('edit-err').style.display = 'none';
+  document.getElementById('edit-overlay').classList.add('show');
+}
+
+function closeEditModal() {
+  document.getElementById('edit-overlay').classList.remove('show');
+  editingListingId = null;
+}
+
+async function saveEdit() {
+  const errEl = document.getElementById('edit-err');
+  errEl.style.display = 'none';
+
+  let specifics;
+  try {
+    specifics = JSON.parse(document.getElementById('edit-specifics').value || '{}');
+  } catch (e) {
+    errEl.textContent = 'Item specifics must be valid JSON, e.g. {"Brand": "Acme"}.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const keywords = document.getElementById('edit-keywords').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  const payload = {
+    title: document.getElementById('edit-title').value,
+    description: document.getElementById('edit-description').value,
+    item_specifics: specifics,
+    keywords,
+  };
+
+  try {
+    await apiSend(`/listings/${editingListingId}`, payload, 'PUT');
+    closeEditModal();
+    load();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+  }
 }
 
 function changePage(delta) {
@@ -370,7 +537,7 @@ async function load() {
     tb.innerHTML = '';
     const rows = d.candidates || [];
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">No candidates match this filter.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="8" class="empty">No candidates match this filter.</td></tr>';
     } else {
       for (const c of rows) tb.appendChild(renderRow(c));
     }

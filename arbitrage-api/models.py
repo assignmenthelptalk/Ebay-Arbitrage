@@ -153,6 +153,34 @@ class ScoringPrior(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class GeneratedListing(Base):
+    """AI-drafted eBay listing (§4A.4). Multiple rows per candidate allowed
+    (regeneration history) — the most recent row for a candidate is current.
+    Cassini-provided required item specifics are NOT fetched yet (see the
+    `_category_aspects` stub in services/listing_generator.py) — item_specifics
+    here are general/plausible only until that's wired up."""
+
+    __tablename__ = "generated_listings"
+
+    id = Column(Integer, primary_key=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=False, index=True)
+
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    item_specifics = Column(JSON, default=dict)
+    keywords = Column(JSON, default=list)
+
+    provider = Column(String, nullable=False)  # anthropic | kimi | openai | mock
+    model = Column(String, nullable=False)
+    raw_response = Column(Text)  # full raw provider reply, for debugging
+
+    edited = Column(Boolean, default=False, nullable=False)  # false = AI draft, true = human-edited
+    status = Column(String, default="draft", nullable=False)  # draft | approved
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 

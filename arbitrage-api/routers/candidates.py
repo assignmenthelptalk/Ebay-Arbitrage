@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Candidate, MarginCalc, Score
+from models import Candidate, GeneratedListing, MarginCalc, Score
 from services import margin_engine
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
@@ -73,10 +73,28 @@ def _score_to_dict(s: Score) -> dict:
     }
 
 
+def _listing_to_dict(listing: GeneratedListing) -> dict:
+    return {
+        "id": listing.id,
+        "candidate_id": listing.candidate_id,
+        "title": listing.title,
+        "description": listing.description,
+        "item_specifics": listing.item_specifics,
+        "keywords": listing.keywords,
+        "provider": listing.provider,
+        "model": listing.model,
+        "edited": listing.edited,
+        "status": listing.status,
+        "created_at": listing.created_at.isoformat() if listing.created_at else None,
+        "updated_at": listing.updated_at.isoformat() if listing.updated_at else None,
+    }
+
+
 def _candidate_to_dict(
     c: Candidate,
     latest_margin: Optional[MarginCalc] = None,
     latest_score: Optional[Score] = None,
+    latest_listing: Optional[GeneratedListing] = None,
 ) -> dict:
     return {
         "id": c.id,
@@ -90,6 +108,7 @@ def _candidate_to_dict(
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "margin": _margin_calc_to_dict(latest_margin) if latest_margin else None,
         "score": _score_to_dict(latest_score) if latest_score else None,
+        "listing": _listing_to_dict(latest_listing) if latest_listing else None,
     }
 
 
@@ -107,6 +126,15 @@ def _latest_score(db: Session, candidate_id: int) -> Optional[Score]:
         db.query(Score)
         .filter(Score.candidate_id == candidate_id)
         .order_by(Score.created_at.desc())
+        .first()
+    )
+
+
+def _latest_listing(db: Session, candidate_id: int) -> Optional[GeneratedListing]:
+    return (
+        db.query(GeneratedListing)
+        .filter(GeneratedListing.candidate_id == candidate_id)
+        .order_by(GeneratedListing.created_at.desc())
         .first()
     )
 
@@ -203,7 +231,8 @@ def list_candidates(
         "limit": limit,
         "offset": offset,
         "candidates": [
-            _candidate_to_dict(c, _latest_margin(db, c.id), _latest_score(db, c.id)) for c in candidates
+            _candidate_to_dict(c, _latest_margin(db, c.id), _latest_score(db, c.id), _latest_listing(db, c.id))
+            for c in candidates
         ],
     }
 
@@ -219,7 +248,12 @@ def get_candidate(candidate_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
-    data = _candidate_to_dict(candidate, history[0] if history else None, _latest_score(db, candidate_id))
+    data = _candidate_to_dict(
+        candidate,
+        history[0] if history else None,
+        _latest_score(db, candidate_id),
+        _latest_listing(db, candidate_id),
+    )
     data["margin_history"] = [_margin_calc_to_dict(m) for m in history]
     return data
 
@@ -234,7 +268,7 @@ def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Sess
 
     margin_calc = _run_margin_and_store(db, candidate, candidate.sale_price, candidate.amazon_cost)
 
-    return _candidate_to_dict(candidate, margin_calc, _latest_score(db, candidate_id))
+    return _candidate_to_dict(candidate, margin_calc, _latest_score(db, candidate_id), _latest_listing(db, candidate_id))
 
 
 @router.post("/{candidate_id}/approve")
@@ -257,7 +291,17 @@ def approve_candidate(candidate_id: int, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(candidate)
 
-    return _candidate_to_dict(candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id))
+    # Approve product + listing together: lock the latest draft too, if one
+    # exists. No draft yet is fine — approval isn't blocked on it, the
+    # response's "listing": null makes the absence explicit to the caller.
+    listing = _latest_listing(db, candidate.id)
+    if listing and listing.status != "approved":
+        listing.status = "approved"
+        listing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(listing)
+
+    return _candidate_to_dict(candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id), listing)
 
 
 @router.post("/{candidate_id}/reject")
@@ -272,4 +316,6 @@ def reject_candidate(candidate_id: int, payload: RejectRequest, db: Session = De
 
     # payload.reason is intentionally not persisted: there's no existing
     # column/table to hold it without altering the schema (additive-only).
-    return _candidate_to_dict(candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id))
+    return _candidate_to_dict(
+        candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id), _latest_listing(db, candidate.id)
+    )

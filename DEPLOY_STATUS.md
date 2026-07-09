@@ -36,6 +36,15 @@ Review/Approval Dashboard (§4A.5, 2026-07-09): `approve`/`reject` endpoints + a
 UI — the human gate the whole plan hinges on. No AI spend, no eBay dependency. 52/52 tests green.
 See item 12 below.
 
+AI Listing Generator (§4A.4, 2026-07-09): draft eBay listings for `scored` candidates via the same
+provider-agnostic model layer (Anthropic/Kimi/OpenAI/Mock), editable in the dashboard, approved
+together with the candidate. Cassini/Taxonomy enrichment deliberately deferred (clearly-marked
+stub). 64/64 tests green, **live-verified end-to-end at zero spend** (score → generate → edit →
+approve, mock provider). **The acquisition half of the v2 system is now functionally complete**:
+a candidate can flow all the way from intake to an approved product + finished listing, gated by
+margin, scored by AI, reviewed/edited by a human, entirely free until a real model is deliberately
+switched on. See item 13 below.
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -415,6 +424,80 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
     - **Not done:** listing generator, publish flow, and ZIK integration are explicitly out of scope
       (blocked on §4A.4/§4A.6 not existing yet) — this dashboard only shows/actions candidates, it
       can't show or edit listings that don't exist yet. Not pushed to origin.
+13. **AI Listing Generator (§4A.4) — DONE (2026-07-09).** Draft eBay listings for `scored`
+    candidates, editable and approved together with the candidate. Additive only — no existing
+    tables altered, `EBAY_ENV`/`DRY_RUN`/fulfillment bot untouched, behind the same `X-API-Key`
+    dependency as every other router.
+    - **New `generated_listings` table** (`models.py`): `title`/`description`/`item_specifics`
+      (JSON)/`keywords` (JSON), `provider`/`model`/`raw_response` (audit), `edited` (false=AI draft,
+      true=human-edited), `status` (`draft`/`approved`, mirrors the candidate), multiple rows per
+      candidate allowed (regen history), latest = current. Created via the existing
+      `init_db()`/`create_all` mechanism — confirmed live: table now exists (0 rows pre-test-run),
+      all 9 prior tables' row counts unchanged after restart.
+    - **Provider layer generalized, not duplicated:** `services/model_providers.py`'s
+      `get_provider()` now takes `(provider_env, model_env, default_provider)` instead of hardcoding
+      `SCORER_PROVIDER`/`SCORER_MODEL`/`"kimi"` — the scorer's call site is unchanged (same
+      defaults), the generator calls it with `LISTING_PROVIDER`/`LISTING_MODEL`/**`"mock"`** as the
+      default, so an unset env var never accidentally spends (unlike the scorer, whose unset default
+      is a paid provider — real `.env` overrides that to `mock` explicitly). `MockProvider` now
+      serves both callers: it returns a listing-shaped payload when the prompt contains the literal
+      marker `"item_specifics"`, else the original score payload — confirmed backward compatible,
+      the 46 pre-existing scorer tests are untouched.
+    - **`services/listing_generator.py`** (new) — pure computation, no DB access, mirrors
+      `margin_engine.py`'s role rather than `scoring.py`'s router-embedded one. `_build_prompt`
+      (honest about thin inputs, general item specifics only), `generate_listing()` (same
+      `{"ok": bool, ...}` contract as the scorer's `_score_candidate`). **Cassini/Taxonomy socket**:
+      `_category_aspects(category) -> dict` stub, always returns `{}`, docstring marks it as the
+      future eBay Taxonomy/Metadata rewarded-aspects injection point — deliberately not built this
+      round.
+    - **`routers/listings_gen.py`** (new, registered in `main.py`): `POST
+      /candidates/{id}/generate-listing` (allowed from `scored`/`approved`, 409 from
+      `pending_review`/`rejected`/`rejected_margin`/`scoring_failed`), `POST
+      /listings/generate-pending` (cost-guarded batch mirroring `/scoring/run`: skips
+      already-drafted candidates unless `force=true`, capped at `LISTING_BATCH_MAX`/default 25),
+      `GET /candidates/{id}/listing` (returns `{"listing": null}` rather than 404 when none exists —
+      a normal dashboard state), `PUT /listings/{id}` (partial edit, sets `edited=true`). Note:
+      `/listings/generate-pending` and `PUT /listings/{id}` share the `/listings` prefix with the
+      pre-existing live-eBay-listings router (`routers/listings.py`) — confirmed no path/method
+      collision, but it's the same URL namespace for two different resources (draft listings vs.
+      live eBay listings); worth knowing if that router grows.
+    - **`_candidate_to_dict` enriched again** (`routers/candidates.py`): now also carries `"listing"`
+      — the latest `GeneratedListing` — alongside `margin`/`score`, threaded through
+      list/detail/reevaluate/approve/reject, same pattern as the score enrichment in item 12.
+    - **Approve product + listing together**: `POST /candidates/{id}/approve` now also locks the
+      latest draft to `status="approved"` (idempotent) if one exists. No draft yet doesn't block
+      approval — response carries `"listing": null`, no crash, no extra warning field.
+    - **12 new tests** (`tests/test_listings_gen.py`, 64 total in the suite): generate for `scored`
+      (draft stored, candidate status untouched), same flow through the **real** `get_provider()`
+      factory with `LISTING_PROVIDER=mock` (not just a fake, proves actual wiring), blocked for
+      `rejected_margin` (409) and missing candidate (404), `generate-pending` cost guards (skip
+      already-drafted, batch cap with overflow reported not dropped), `PUT` edit (partial update,
+      `edited=true`, untouched fields preserved), 404 on missing listing id, approve-with-draft locks
+      both (re-fetched to prove persistence, not just echoed), approve-without-draft is fine
+      (`listing: null`, no crash). Real `arbitrage.db` confirmed byte-unchanged after the suite.
+    - **Dashboard (`candidates.html`) extended**, not a new page: new "Listing Draft" table column
+      showing title/description/item-specifics/keywords with an `AI DRAFT`/`EDITED`/`LOCKED` state
+      tag; Generate/Regenerate button (`POST .../generate-listing`); Edit button opening a small
+      modal (title/description/item-specifics-as-JSON/keywords, client-side JSON validation) that
+      calls `PUT /listings/{id}`; existing Approve button unchanged (server-side lock is automatic).
+      Reused all existing CSS vars/badge classes/`esc`/`money` helpers, no new auth path, no external
+      libraries. Generalized the old `apiPost` helper into method-aware `apiSend` for the new PUT
+      call.
+    - **Live-verified end-to-end at zero spend (2026-07-09), operator-run curls**: `POST
+      /candidates/1/score` (mock) → `scored`; `POST /candidates/1/generate-listing` (mock) → draft
+      stored; `PUT /listings/{id}` → `edited=true` with the hand-edited title preserved; `POST
+      /candidates/1/approve` → both candidate and listing flipped to `approved`, edited title still
+      intact. Confirmed in the dashboard too: state tag progressed `AI DRAFT` → `EDITED` → `LOCKED`
+      as expected; Regenerate on a `rejected` candidate correctly surfaced the 409 guard in the UI.
+    - **Not done (deliberately out of scope):** Cassini/Taxonomy enrichment (stubbed only), Publish
+      (§4A.6 — pushing an approved listing to eBay, a production/go-live step needing the real
+      seller account), ZIK integration. Not pushed to origin.
+
+**Acquisition-side milestone:** as of item 13, a candidate can go from intake all the way to an
+approved product + finished, human-edited listing — gated by margin (§4A.2), scored by AI (§4A.3),
+reviewed/edited by a human (§4A.5/§4A.4) — entirely in a browser, entirely free until a real model
+provider is deliberately switched on. What remains for the *outbound* loop is Publish (§4A.6) alone,
+which is intentionally a production/go-live step. Everything before publish is done.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

@@ -44,7 +44,18 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-from routers import auth as auth_router, candidates, competitors, listings, logs, margin, orders, research, scoring  # noqa: E402
+from routers import (  # noqa: E402
+    auth as auth_router,
+    candidates,
+    competitors,
+    listings,
+    listings_gen,
+    logs,
+    margin,
+    orders,
+    research,
+    scoring,
+)
 
 protected = [Depends(require_api_key)]
 
@@ -59,6 +70,8 @@ app.include_router(research.router, dependencies=protected)
 app.include_router(candidates.router, dependencies=protected)
 app.include_router(scoring.router, dependencies=protected)
 app.include_router(scoring.candidate_score_router, dependencies=protected)
+app.include_router(listings_gen.router, dependencies=protected)
+app.include_router(listings_gen.candidate_listing_router, dependencies=protected)
 
 
 @app.get("/health")

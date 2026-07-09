@@ -212,6 +212,18 @@ class MockProvider(ModelProvider):
         self.model = model
 
     async def complete(self, system_prompt: str, user_content: str) -> dict:
+        # Schema-aware by a literal marker rather than a second class/interface
+        # change: the listing generator's system prompt always mentions
+        # "item_specifics" (it's part of the schema it asks the model for),
+        # the scorer's prompt never does. Falls back to the score shape so the
+        # existing scorer callers/tests are unaffected.
+        if "item_specifics" in system_prompt:
+            return {
+                "title": "MOCK Listing Title — no model was called",
+                "description": "MOCK description — no model was called (LISTING_PROVIDER=mock).",
+                "item_specifics": {"Brand": "Unbranded", "Condition": "New"},
+                "keywords": ["mock", "placeholder"],
+            }
         return {
             "should_list": True,
             "risk_level": "low",
@@ -229,17 +241,27 @@ _PROVIDERS = {
 }
 
 
-def get_provider() -> ModelProvider:
-    """Factory: reads SCORER_PROVIDER + SCORER_MODEL from .env and returns
-    the configured adapter. Raises ProviderError on an unknown provider name
-    rather than silently defaulting."""
-    provider_name = os.getenv("SCORER_PROVIDER", "kimi").strip().lower()
-    model = os.getenv("SCORER_MODEL", "").strip()
+def get_provider(
+    provider_env: str = "SCORER_PROVIDER",
+    model_env: str = "SCORER_MODEL",
+    default_provider: str = "kimi",
+) -> ModelProvider:
+    """Factory: reads `provider_env` + `model_env` from .env and returns the
+    configured adapter. Raises ProviderError on an unknown provider name
+    rather than silently defaulting.
+
+    Callers can point this at a different env-var pair to get an
+    independently configurable provider selection — e.g. the listing
+    generator uses LISTING_PROVIDER/LISTING_MODEL (default "mock", so an
+    unset env var never accidentally spends) instead of the scorer's
+    SCORER_PROVIDER/SCORER_MODEL (default "kimi")."""
+    provider_name = os.getenv(provider_env, default_provider).strip().lower()
+    model = os.getenv(model_env, "").strip()
 
     provider_cls = _PROVIDERS.get(provider_name)
     if provider_cls is None:
         raise ProviderError(
-            f"Unknown SCORER_PROVIDER '{provider_name}' — must be one of {sorted(_PROVIDERS)}"
+            f"Unknown {provider_env} '{provider_name}' — must be one of {sorted(_PROVIDERS)}"
         )
 
     if model:
