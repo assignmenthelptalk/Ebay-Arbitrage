@@ -32,6 +32,10 @@ end-to-end at zero spend via `SCORER_PROVIDER=mock`** — real intake → margin
 Kimi, OpenAI) remain mock-tested-only — no live call made yet, deliberately deferred until spend is
 explicitly requested. See item 11 below.
 
+Review/Approval Dashboard (§4A.5, 2026-07-09): `approve`/`reject` endpoints + a candidate-review web
+UI — the human gate the whole plan hinges on. No AI spend, no eBay dependency. 52/52 tests green.
+See item 12 below.
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -373,6 +377,44 @@ Service is intentionally left **disabled/inactive** — repointed but not turned
         `SCORER_PROVIDER=kimi` (or `anthropic`/`openai`) + the matching API key + restart. No code
         change needed. Switch back to `mock` any time to keep demoing/testing for free.
     - **Not done:** not pushed to origin.
+12. **Review/Approval Dashboard (§4A.5) — DONE (2026-07-09).** Makes the candidates pipeline usable
+    by a human. Additive only — no existing tables altered, `EBAY_ENV`/`DRY_RUN` untouched, fulfillment
+    bot untouched, behind the same `X-API-Key` dependency as every other router.
+    - **`POST /candidates/{id}/approve`** — sets `status="approved"`. Blocked (409, clear
+      `detail.message`) from `rejected`/`rejected_margin`/`scoring_failed`; allowed from
+      `pending_review`/`scored`; re-approving an already-`approved` candidate is a no-op (still 200).
+    - **`POST /candidates/{id}/reject`** — sets `status="rejected"` from any state (universal
+      kill-switch); re-rejecting is a no-op. Optional `reason` in the body is accepted but **not
+      persisted** — no existing column/table to hold it without a schema change, so it's intentionally
+      dropped rather than silently faked.
+    - **Score enrichment (required, not originally scoped for Stage 1):** `GET /candidates`,
+      `GET /candidates/{id}`, and every mutating candidates endpoint now also return the candidate's
+      latest `Score` row (`should_list`/`risk_level`/`confidence`/`reason`) alongside `margin` — that
+      data existed in the `scores` table but no endpoint surfaced it before this. Purely additive to
+      the response shape; no schema change.
+    - **7 new tests** (`tests/test_candidates.py`, 52 total in the suite): approve from `scored` and
+      from `pending_review`, approve idempotency, approve blocked from `rejected_margin` (409 +
+      unchanged status/history), reject from a non-pending state, reject idempotency including from
+      `rejected_margin`. All confirm margin/score history is untouched by status transitions. Real
+      `arbitrage.db` confirmed byte-unchanged after the suite.
+    - **`arbitrage-api/candidates.html`** — new page, not an extension of `dashboard.html` (that
+      page's "Pending Approvals" panel is the *fulfillment*-purchase gate, a different domain).
+      Vanilla HTML/JS, same dark theme/CSS vars/helpers as `dashboard.html`, same auth pattern
+      (`X-API-Key` from `localStorage['apiKey']`, prompted client-side — no new auth scheme, no keys
+      added). Lists candidates with title/source/ASIN, sale price, amazon cost, margin
+      (net profit/%, pass/fail, reason), score (should_list/risk/confidence/reason), and a
+      color-coded status badge; status filter (`?status=`) with pagination; per-row Approve/Reject/
+      Re-evaluate (posts new `amazon_cost` to the existing reevaluate endpoint) actions; Amazon
+      click-through link (`amazon.com/dp/{asin}`) when an ASIN is present; reloads the row/list after
+      any action so status changes are visible immediately.
+    - **Served via `GET /candidates-dashboard`** in `main.py`, mirroring `/dashboard`'s mechanism
+      exactly (`FileResponse`, not behind `require_api_key` — same as the existing dashboard; auth
+      happens per-fetch via the JS, not on page load).
+    - **Live-verified** by the operator after a restart: candidates list with margin+score+status,
+      Approve/Reject/filter/Amazon-link all confirmed working in the browser.
+    - **Not done:** listing generator, publish flow, and ZIK integration are explicitly out of scope
+      (blocked on §4A.4/§4A.6 not existing yet) — this dashboard only shows/actions candidates, it
+      can't show or edit listings that don't exist yet. Not pushed to origin.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

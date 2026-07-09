@@ -69,3 +69,8 @@ async def health():
 @app.get("/dashboard", include_in_schema=False)
 async def dashboard():
     return FileResponse(Path(__file__).parent / "dashboard.html", media_type="text/html")
+
+
+@app.get("/candidates-dashboard", include_in_schema=False)
+async def candidates_dashboard():
+    return FileResponse(Path(__file__).parent / "candidates.html", media_type="text/html")

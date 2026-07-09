@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from auth import require_api_key
 from database import Base, get_db
+from models import Candidate
 from routers import candidates
 from services import margin_engine
 
@@ -43,7 +44,21 @@ def client(tmp_path, monkeypatch):
     app.include_router(candidates.router, dependencies=[Depends(require_api_key)])
     app.dependency_overrides[get_db] = override_get_db
 
-    return TestClient(app)
+    test_client = TestClient(app)
+    # Scoring lives in a separate router not mounted here (see class docstring
+    # above) — tests that need a "scored" candidate set it directly via this.
+    test_client.SessionLocal = TestSessionLocal
+    return test_client
+
+
+def _set_status(client, candidate_id: int, status: str) -> None:
+    db = client.SessionLocal()
+    try:
+        candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
+        candidate.status = status
+        db.commit()
+    finally:
+        db.close()
 
 
 def test_intake_passing_product_stores_pending_review(client):
@@ -137,6 +152,109 @@ def test_reevaluate_flips_status_and_keeps_history(client):
     assert len(detail["margin_history"]) == 2
     assert detail["margin_history"][0]["passed"] is True   # newest, current
     assert detail["margin_history"][1]["passed"] is False  # original, kept for history
+
+
+def test_approve_scored_candidate_sets_approved(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 50.0, "amazon_cost": 20.0},
+        headers=HEADERS,
+    ).json()
+    candidate_id = created["id"]
+    _set_status(client, candidate_id, "scored")
+
+    resp = client.post(f"/candidates/{candidate_id}/approve", headers=HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "approved"
+
+    detail = client.get(f"/candidates/{candidate_id}", headers=HEADERS).json()
+    assert detail["status"] == "approved"
+    assert len(detail["margin_history"]) == 1  # approve must not touch margin history
+
+
+def test_approve_pending_review_candidate_sets_approved(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 50.0, "amazon_cost": 20.0},
+        headers=HEADERS,
+    ).json()
+    assert created["status"] == "pending_review"
+
+    resp = client.post(f"/candidates/{created['id']}/approve", headers=HEADERS)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "approved"
+
+
+def test_approve_is_idempotent(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 50.0, "amazon_cost": 20.0},
+        headers=HEADERS,
+    ).json()
+    candidate_id = created["id"]
+
+    first = client.post(f"/candidates/{candidate_id}/approve", headers=HEADERS)
+    assert first.status_code == 200
+    second = client.post(f"/candidates/{candidate_id}/approve", headers=HEADERS)
+    assert second.status_code == 200
+    assert second.json()["status"] == "approved"
+
+
+def test_approve_blocked_for_rejected_margin_candidate(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 25.0, "amazon_cost": 18.0},
+        headers=HEADERS,
+    ).json()
+    assert created["status"] == "rejected_margin"
+    candidate_id = created["id"]
+
+    resp = client.post(f"/candidates/{candidate_id}/approve", headers=HEADERS)
+    assert resp.status_code == 409
+    assert "rejected_margin" in resp.json()["detail"]["message"]
+
+    # blocked attempt must not have changed the stored status
+    detail = client.get(f"/candidates/{candidate_id}", headers=HEADERS).json()
+    assert detail["status"] == "rejected_margin"
+    assert len(detail["margin_history"]) == 1
+
+
+def test_reject_sets_rejected_from_any_state(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 50.0, "amazon_cost": 20.0},
+        headers=HEADERS,
+    ).json()
+    candidate_id = created["id"]
+    _set_status(client, candidate_id, "scored")
+
+    resp = client.post(f"/candidates/{candidate_id}/reject", json={"reason": "not worth it"}, headers=HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "rejected"
+
+    detail = client.get(f"/candidates/{candidate_id}", headers=HEADERS).json()
+    assert detail["status"] == "rejected"
+    assert len(detail["margin_history"]) == 1  # reject must not touch margin history
+
+
+def test_reject_is_idempotent_and_reject_of_rejected_margin_allowed(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 25.0, "amazon_cost": 18.0},
+        headers=HEADERS,
+    ).json()
+    assert created["status"] == "rejected_margin"
+    candidate_id = created["id"]
+
+    first = client.post(f"/candidates/{candidate_id}/reject", json={}, headers=HEADERS)
+    assert first.status_code == 200
+    assert first.json()["status"] == "rejected"
+
+    second = client.post(f"/candidates/{candidate_id}/reject", json={}, headers=HEADERS)
+    assert second.status_code == 200
+    assert second.json()["status"] == "rejected"
 
 
 def test_real_arbitrage_db_untouched_by_suite():

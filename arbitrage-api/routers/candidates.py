@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Candidate, MarginCalc
+from models import Candidate, MarginCalc, Score
 from services import margin_engine
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
@@ -25,6 +25,13 @@ class IntakeRequest(BaseModel):
 class ReevaluateRequest(BaseModel):
     amazon_cost: float
     sale_price: Optional[float] = None
+
+
+class RejectRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+NOT_APPROVABLE_STATUSES = {"rejected", "rejected_margin", "scoring_failed"}
 
 
 def _margin_calc_to_dict(m: MarginCalc) -> dict:
@@ -52,7 +59,25 @@ def _margin_calc_to_dict(m: MarginCalc) -> dict:
     }
 
 
-def _candidate_to_dict(c: Candidate, latest_margin: Optional[MarginCalc] = None) -> dict:
+def _score_to_dict(s: Score) -> dict:
+    return {
+        "id": s.id,
+        "should_list": s.should_list,
+        "risk_level": s.risk_level,
+        "confidence": s.confidence,
+        "reason": s.reason,
+        "competition_score": s.competition_score,
+        "provider": s.provider,
+        "model": s.model,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+    }
+
+
+def _candidate_to_dict(
+    c: Candidate,
+    latest_margin: Optional[MarginCalc] = None,
+    latest_score: Optional[Score] = None,
+) -> dict:
     return {
         "id": c.id,
         "source": c.source,
@@ -64,6 +89,7 @@ def _candidate_to_dict(c: Candidate, latest_margin: Optional[MarginCalc] = None)
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "margin": _margin_calc_to_dict(latest_margin) if latest_margin else None,
+        "score": _score_to_dict(latest_score) if latest_score else None,
     }
 
 
@@ -72,6 +98,15 @@ def _latest_margin(db: Session, candidate_id: int) -> Optional[MarginCalc]:
         db.query(MarginCalc)
         .filter(MarginCalc.candidate_id == candidate_id)
         .order_by(MarginCalc.created_at.desc())
+        .first()
+    )
+
+
+def _latest_score(db: Session, candidate_id: int) -> Optional[Score]:
+    return (
+        db.query(Score)
+        .filter(Score.candidate_id == candidate_id)
+        .order_by(Score.created_at.desc())
         .first()
     )
 
@@ -167,7 +202,9 @@ def list_candidates(
         "total": total,
         "limit": limit,
         "offset": offset,
-        "candidates": [_candidate_to_dict(c, _latest_margin(db, c.id)) for c in candidates],
+        "candidates": [
+            _candidate_to_dict(c, _latest_margin(db, c.id), _latest_score(db, c.id)) for c in candidates
+        ],
     }
 
 
@@ -182,7 +219,7 @@ def get_candidate(candidate_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
-    data = _candidate_to_dict(candidate, history[0] if history else None)
+    data = _candidate_to_dict(candidate, history[0] if history else None, _latest_score(db, candidate_id))
     data["margin_history"] = [_margin_calc_to_dict(m) for m in history]
     return data
 
@@ -197,4 +234,42 @@ def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Sess
 
     margin_calc = _run_margin_and_store(db, candidate, candidate.sale_price, candidate.amazon_cost)
 
-    return _candidate_to_dict(candidate, margin_calc)
+    return _candidate_to_dict(candidate, margin_calc, _latest_score(db, candidate_id))
+
+
+@router.post("/{candidate_id}/approve")
+def approve_candidate(candidate_id: int, db: Session = Depends(get_db)):
+    candidate = _get_candidate_or_404(db, candidate_id)
+
+    if candidate.status in NOT_APPROVABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": True,
+                "message": f"Cannot approve candidate in status '{candidate.status}'",
+                "code": 409,
+            },
+        )
+
+    if candidate.status != "approved":
+        candidate.status = "approved"
+        candidate.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(candidate)
+
+    return _candidate_to_dict(candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id))
+
+
+@router.post("/{candidate_id}/reject")
+def reject_candidate(candidate_id: int, payload: RejectRequest, db: Session = Depends(get_db)):
+    candidate = _get_candidate_or_404(db, candidate_id)
+
+    if candidate.status != "rejected":
+        candidate.status = "rejected"
+        candidate.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(candidate)
+
+    # payload.reason is intentionally not persisted: there's no existing
+    # column/table to hold it without altering the schema (additive-only).
+    return _candidate_to_dict(candidate, _latest_margin(db, candidate.id), _latest_score(db, candidate.id))

@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Candidate Review</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; }
+
+.header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 24px; display: flex; align-items: center;
+  justify-content: space-between; position: sticky; top: 0; z-index: 10;
+}
+.header-title { font-size: 15px; font-weight: 600; }
+.header-title span { color: var(--muted); font-weight: 400; }
+.header-title a { color: var(--blue); text-decoration: none; font-size: 12px; margin-left: 14px; }
+.header-title a:hover { text-decoration: underline; }
+.refresh-info { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.dot.stale { background: var(--yellow); }
+
+main { padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
+
+.toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+.toolbar select {
+  background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 10px; font-size: 13px;
+}
+.btn {
+  padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text); cursor: pointer;
+  font-size: 12px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+.btn:hover { background: #2d333b; border-color: var(--muted); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-green { background: #1a4731; border-color: #2ea043; color: #7ee787; }
+.btn-green:hover { background: #1e5738; }
+.btn-red { background: #4a1f1f; border-color: #f85149; color: #ffa198; }
+.btn-red:hover { background: #5a2626; }
+.btn-blue { background: #1a2d4a; border-color: #1f6feb; color: #79c0ff; }
+.btn-blue:hover { background: #1d3d6b; }
+.pill { background: var(--surface2); color: var(--muted); border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; margin-left: 4px; }
+
+.err-banner {
+  background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.3);
+  border-radius: 6px; padding: 8px 14px; color: var(--red);
+  font-size: 12px; margin-bottom: 16px; display: none;
+}
+
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; padding: 9px 12px;
+  text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+tbody tr { border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child { border-bottom: none; }
+tbody tr.st-approved { background: rgba(63,185,80,.05); }
+tbody tr.st-rejected, tbody tr.st-rejected_margin { background: rgba(248,81,73,.04); }
+tbody tr:hover { background: rgba(255,255,255,0.03); }
+td { padding: 9px 12px; }
+.mono { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+.muted { color: var(--muted); }
+.clip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { padding: 32px 14px; text-align: center; color: var(--muted); }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+.b-pending_review  { background: rgba(88,166,255,.15);  color: #58a6ff; }
+.b-scored          { background: rgba(188,140,255,.15); color: #bc8cff; }
+.b-scoring_failed  { background: rgba(210,153,34,.15);  color: #d29922; }
+.b-approved        { background: rgba(63,185,80,.15);   color: #3fb950; }
+.b-rejected        { background: rgba(248,81,73,.15);   color: #f85149; }
+.b-rejected_margin { background: rgba(248,81,73,.12);   color: #f85149; }
+.b-unknown         { background: rgba(139,148,158,.12); color: #8b949e; }
+
+.mg-good { color: #3fb950; }
+.mg-ok   { color: #d29922; }
+.mg-bad  { color: #f85149; }
+
+.margin-cell .mg-line1 { font-weight: 600; }
+.margin-cell .mg-line2 { color: var(--muted); font-size: 11px; }
+.margin-cell.fail .mg-line1 { color: var(--red); }
+
+.score-cell { min-width: 170px; }
+.score-top { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.sl-yes { color: #3fb950; font-weight: 700; }
+.sl-no { color: #f85149; font-weight: 700; }
+.risk-low { color: #3fb950; }
+.risk-med { color: #d29922; }
+.risk-high { color: #f85149; }
+.score-reason { color: var(--muted); font-size: 11px; max-width: 260px; }
+.no-score { color: var(--muted); font-style: italic; }
+
+.row-actions { display: flex; flex-direction: column; gap: 6px; min-width: 150px; }
+.row-actions .btn-row { display: flex; gap: 6px; }
+.reeval-row { display: flex; gap: 4px; align-items: center; }
+.reeval-row input {
+  width: 72px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; padding: 4px 6px;
+}
+.row-msg { font-size: 11px; margin-top: 2px; }
+.row-msg.ok { color: var(--green); }
+.row-msg.err { color: var(--red); }
+.spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.5s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+a.asin-link { color: var(--blue); text-decoration: none; }
+a.asin-link:hover { text-decoration: underline; }
+
+.pagination { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">eBay Arbitrage <span>/ Candidate Review</span><a href="/dashboard">Dashboard →</a></div>
+  <div class="refresh-info">
+    <div class="dot" id="dot"></div>
+    <span id="loaded-at">—</span>
+    <button class="btn" onclick="load()">Refresh</button>
+  </div>
+</div>
+
+<main>
+  <div class="err-banner" id="err"></div>
+
+  <div class="toolbar">
+    <label class="muted">Status:</label>
+    <select id="status-filter" onchange="load()">
+      <option value="">All</option>
+      <option value="pending_review">pending_review</option>
+      <option value="scored">scored</option>
+      <option value="approved">approved</option>
+      <option value="rejected">rejected</option>
+      <option value="rejected_margin">rejected_margin</option>
+      <option value="scoring_failed">scoring_failed</option>
+    </select>
+    <span class="pill" id="c-total">—</span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Title / Source</th>
+        <th>Sale Price</th>
+        <th>Amazon Cost</th>
+        <th>Margin</th>
+        <th>Score</th>
+        <th>Status</th>
+        <th>Actions</th>
+      </tr></thead>
+      <tbody id="t-candidates"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <button class="btn" id="prev-page" onclick="changePage(-1)">← Prev</button>
+    <span id="page-info">—</span>
+    <button class="btn" id="next-page" onclick="changePage(1)">Next →</button>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+const LIMIT = 50;
+let offset = 0;
+let lastTotal = 0;
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function money(n) {
+  return '$' + Number(n ?? 0).toFixed(2);
+}
+
+function mgClass(pct) {
+  if (pct == null) return '';
+  return pct >= 15 ? 'mg-good' : pct >= 5 ? 'mg-ok' : 'mg-bad';
+}
+
+function badge(status) {
+  const s = String(status ?? 'unknown').toLowerCase();
+  const known = new Set(['pending_review','scored','approved','rejected','rejected_margin','scoring_failed']);
+  const cls = known.has(s) ? s : 'unknown';
+  return `<span class="badge b-${cls}">${esc(status ?? 'unknown')}</span>`;
+}
+
+function showErr(msg) {
+  const el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(showErr._t);
+  showErr._t = setTimeout(() => el.style.display = 'none', 8000);
+}
+
+function getApiKey() {
+  let key = localStorage.getItem('apiKey');
+  if (!key) {
+    key = prompt('Enter API key for this dashboard (set via API_KEYS on the server):') || '';
+    if (key) localStorage.setItem('apiKey', key);
+  }
+  return key;
+}
+
+async function apiFetch(url, opts) {
+  const headers = { ...(opts?.headers || {}), 'X-API-Key': getApiKey() };
+  const r = await fetch(url, { ...opts, headers });
+  if (r.status === 401 || r.status === 403) {
+    localStorage.removeItem('apiKey');
+  }
+  if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(`${r.status}: ${t.slice(0,150)}`); }
+  return r.json();
+}
+
+// POST helper that surfaces the API's structured `detail` message (e.g. the
+// 409 "cannot approve" reason) instead of a generic "HTTP 409".
+async function apiPost(url, body) {
+  const headers = { 'Content-Type': 'application/json', 'X-API-Key': getApiKey() };
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body ?? {}) });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 403) localStorage.removeItem('apiKey');
+  if (!r.ok) {
+    const detail = data && data.detail;
+    const msg = typeof detail === 'string' ? detail : (detail && detail.message) || r.statusText || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function renderMargin(m) {
+  if (!m) return '<span class="no-score">no margin data</span>';
+  const cls = m.passed ? '' : 'fail';
+  const pctClass = mgClass(m.margin_pct != null ? m.margin_pct * 100 : null);
+  const pct = m.margin_pct != null ? (m.margin_pct * 100).toFixed(1) + '%' : '—';
+  return `<div class="margin-cell ${cls}">
+    <div class="mg-line1 ${pctClass}">${money(m.net_profit)} · ${pct} ${m.passed ? '✓' : '✗'}</div>
+    <div class="mg-line2">${esc(m.reason || '')}</div>
+  </div>`;
+}
+
+function renderScore(s) {
+  if (!s) return '<span class="no-score">not scored</span>';
+  const slClass = s.should_list ? 'sl-yes' : 'sl-no';
+  const riskClass = 'risk-' + (s.risk_level || '').toLowerCase();
+  return `<div class="score-cell">
+    <div class="score-top">
+      <span class="${slClass}">${s.should_list ? 'LIST' : 'SKIP'}</span>
+      <span class="muted">·</span>
+      <span class="${riskClass}">${esc(s.risk_level)} risk</span>
+      <span class="muted">·</span>
+      <span class="muted">${esc(s.confidence)} conf.</span>
+    </div>
+    <div class="score-reason" title="${esc(s.reason)}">${esc(s.reason)}</div>
+  </div>`;
+}
+
+function renderActions(c) {
+  const canApprove = !['rejected', 'rejected_margin', 'scoring_failed'].includes(c.status);
+  const asinLink = c.asin
+    ? `<a class="asin-link" href="https://www.amazon.com/dp/${encodeURIComponent(c.asin)}" target="_blank" rel="noopener">Amazon ↗</a>`
+    : '<span class="muted">no ASIN</span>';
+
+  return `<div class="row-actions" data-id="${c.id}">
+    <div class="btn-row">
+      <button class="btn btn-green act-approve" ${canApprove ? '' : 'disabled'}>Approve</button>
+      <button class="btn btn-red act-reject">Reject</button>
+    </div>
+    <div class="reeval-row">
+      <input type="number" step="0.01" min="0" class="reeval-cost" placeholder="new cost" value="${c.amazon_cost}">
+      <button class="btn act-reeval">Re-eval</button>
+    </div>
+    ${asinLink}
+    <div class="row-msg"></div>
+  </div>`;
+}
+
+function renderRow(c) {
+  const tr = document.createElement('tr');
+  tr.className = 'st-' + c.status;
+  const title = c.title || '(untitled)';
+  tr.innerHTML = `
+    <td class="clip" title="${esc(title)}">
+      <div>${esc(title.length > 42 ? title.slice(0,42)+'…' : title)}</div>
+      <div class="mono">${esc(c.source)}${c.asin ? ' · ' + esc(c.asin) : ''}</div>
+    </td>
+    <td>${money(c.sale_price)}</td>
+    <td class="muted">${money(c.amazon_cost)}</td>
+    <td>${renderMargin(c.margin)}</td>
+    <td>${renderScore(c.score)}</td>
+    <td>${badge(c.status)}</td>
+    <td>${renderActions(c)}</td>
+  `;
+
+  const msg = tr.querySelector('.row-msg');
+  const setMsg = (t, cls) => { msg.textContent = t; msg.className = 'row-msg ' + cls; };
+  const buttons = tr.querySelectorAll('button');
+  const lockRow = (locked) => buttons.forEach(b => b.disabled = locked);
+
+  tr.querySelector('.act-approve').onclick = async () => {
+    lockRow(true);
+    try {
+      await apiPost(`/candidates/${c.id}/approve`);
+      setMsg('Approved.', 'ok');
+      setTimeout(load, 600);
+    } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+  };
+
+  tr.querySelector('.act-reject').onclick = async () => {
+    lockRow(true);
+    try {
+      await apiPost(`/candidates/${c.id}/reject`, {});
+      setMsg('Rejected.', 'ok');
+      setTimeout(load, 600);
+    } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+  };
+
+  tr.querySelector('.act-reeval').onclick = async () => {
+    const input = tr.querySelector('.reeval-cost');
+    const newCost = Number(input.value);
+    if (!(newCost > 0)) { setMsg('Enter a valid cost.', 'err'); return; }
+    lockRow(true);
+    try {
+      await apiPost(`/candidates/${c.id}/reevaluate`, { amazon_cost: newCost });
+      setMsg('Re-evaluated.', 'ok');
+      setTimeout(load, 600);
+    } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+  };
+
+  return tr;
+}
+
+function changePage(delta) {
+  const next = offset + delta * LIMIT;
+  if (next < 0 || next >= lastTotal) return;
+  offset = next;
+  load();
+}
+
+async function load() {
+  document.getElementById('dot').className = 'dot stale';
+  const status = document.getElementById('status-filter').value;
+  const params = new URLSearchParams({ limit: LIMIT, offset });
+  if (status) params.set('status', status);
+
+  try {
+    const d = await apiFetch(`/candidates?${params.toString()}`);
+    lastTotal = d.total ?? 0;
+    document.getElementById('c-total').textContent = lastTotal;
+
+    const tb = document.getElementById('t-candidates');
+    tb.innerHTML = '';
+    const rows = d.candidates || [];
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="empty">No candidates match this filter.</td></tr>';
+    } else {
+      for (const c of rows) tb.appendChild(renderRow(c));
+    }
+
+    const page = Math.floor(offset / LIMIT) + 1;
+    const pages = Math.max(1, Math.ceil(lastTotal / LIMIT));
+    document.getElementById('page-info').textContent = `Page ${page} of ${pages} (${lastTotal} total)`;
+    document.getElementById('prev-page').disabled = offset <= 0;
+    document.getElementById('next-page').disabled = offset + LIMIT >= lastTotal;
+
+    document.getElementById('loaded-at').textContent = 'Loaded ' + new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  } catch (e) {
+    showErr('Load error: ' + e.message);
+  } finally {
+    document.getElementById('dot').className = 'dot';
+  }
+}
+
+load();
+</script>
+</body>
+</html>
