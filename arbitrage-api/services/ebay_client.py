@@ -39,6 +39,34 @@ async def fetch_token(client_id: str, client_secret: str) -> dict:
         return resp.json()
 
 
+async def get_cached_app_token(db: Session, client_id: str, client_secret: str) -> dict:
+    """Application (client-credentials) token, cached in the `tokens` table
+    keyed by client_id. Used for Taxonomy/Metadata calls (and any other
+    Commerce API that wants an app token rather than the 3-legged
+    user_token, which 403s on them — see DEPLOY_STATUS.md item 14).
+    Returns {"access_token", "expires_at" (datetime), "source": "cache"|"fresh"}.
+    """
+    from models import Token
+
+    cached = db.query(Token).filter(Token.client_id == client_id).first()
+    if cached and cached.expires_at > datetime.utcnow():
+        return {"access_token": cached.access_token, "expires_at": cached.expires_at, "source": "cache"}
+
+    data = await fetch_token(client_id, client_secret)
+    access_token = data["access_token"]
+    expires_in = data.get("expires_in", 7200)
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+    if cached:
+        cached.access_token = access_token
+        cached.expires_at = expires_at
+    else:
+        db.add(Token(client_id=client_id, access_token=access_token, expires_at=expires_at))
+    db.commit()
+
+    return {"access_token": access_token, "expires_at": expires_at, "source": "fresh"}
+
+
 async def _call(
     method: str,
     path: str,

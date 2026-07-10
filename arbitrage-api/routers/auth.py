@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Token
-from services.ebay_client import fetch_token, _basic_auth, _OAUTH_URLS
+from services.ebay_client import get_cached_app_token, _basic_auth, _OAUTH_URLS
 from services.event_logger import log_event
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -44,16 +44,8 @@ class UserTokenRequest(BaseModel):
 
 @router.post("/ebay/token")
 async def get_ebay_token(payload: TokenRequest, db: Session = Depends(get_db)):
-    cached = db.query(Token).filter(Token.client_id == payload.client_id).first()
-    if cached and cached.expires_at > datetime.utcnow():
-        return {
-            "access_token": cached.access_token,
-            "expires_at": cached.expires_at.isoformat(),
-            "source": "cache",
-        }
-
     try:
-        data = await fetch_token(payload.client_id, payload.client_secret)
+        result = await get_cached_app_token(db, payload.client_id, payload.client_secret)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         log_event(
@@ -72,27 +64,13 @@ async def get_ebay_token(payload: TokenRequest, db: Session = Depends(get_db)):
             detail={"error": True, "message": str(exc), "code": 500},
         )
 
-    access_token = data["access_token"]
-    expires_in = data.get("expires_in", 7200)
-    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-
-    if cached:
-        cached.access_token = access_token
-        cached.expires_at = expires_at
-    else:
-        db.add(Token(
-            client_id=payload.client_id,
-            access_token=access_token,
-            expires_at=expires_at,
-        ))
-    db.commit()
-
-    log_event(db, "token_refresh", detail=f"Token refreshed for {payload.client_id}")
+    if result["source"] == "fresh":
+        log_event(db, "token_refresh", detail=f"Token refreshed for {payload.client_id}")
 
     return {
-        "access_token": access_token,
-        "expires_at": expires_at.isoformat(),
-        "source": "fresh",
+        "access_token": result["access_token"],
+        "expires_at": result["expires_at"].isoformat(),
+        "source": result["source"],
     }
 
 

@@ -45,6 +45,12 @@ a candidate can flow all the way from intake to an approved product + finished l
 margin, scored by AI, reviewed/edited by a human, entirely free until a real model is deliberately
 switched on. See item 13 below.
 
+Cassini/Taxonomy item-specifics enrichment (§4A.4 socket, 2026-07-10): the deferred stub from item
+13 is now built and sandbox-live-verified — real category resolution + cached real per-category
+item aspects, via an app (client-credentials) token, feeding the listing generator's prompt with
+graceful fallback on any failure. 78/78 tests green. See item 15 below (item 14 is the recon that
+preceded it).
+
 Fulfillment bot: venv built + unit repointed to the clone (2026-07-04, see Phase 4b below).
 Service is intentionally left **disabled/inactive** — repointed but not turned on.
 
@@ -532,6 +538,78 @@ which is intentionally a production/go-live step. Everything before publish is d
       for these calls rather than reusing `user_token` — either a small dedicated helper in
       `ebay_client.py`, or extend `_call()`'s token selection. Read-only investigation only; no code
       changed this round.
+15. **Cassini item-specifics enrichment (§4A.4 socket) — BUILT + SANDBOX-LIVE-VERIFIED
+    (2026-07-10).** Wires real eBay Taxonomy/Metadata data into the listing generator's
+    `_category_aspects()` stub (item 13), fulfilling item 14's recon verdict. Additive only — no
+    existing tables altered, `EBAY_ENV`/`DRY_RUN`/fulfillment bot/`user_token` flow untouched,
+    behind the same auth as every other router (no new endpoints added).
+    - **New `category_aspects` table** (`models.py`): one row per eBay `category_id` —
+      `category_name`, `tree_id`, `aspects` (JSON: `[{name, required, allowed_values}]`),
+      `fetched_at`. Reused/updated in place until `CASSINI_ASPECTS_TTL_DAYS` (default 30) elapses,
+      then refetched. Confirmed additive on a throwaway DB copy before ever touching the live one.
+    - **App-token path, not `user_token`:** extracted `ebay_client.get_cached_app_token(db,
+      client_id, client_secret)` — the caching logic that `routers/auth.py`'s `POST /auth/ebay/token`
+      endpoint already had inline, now shared. Caches the client-credentials token in the existing
+      `tokens` table keyed by the real `EBAY_CLIENT_ID` (not a new table, not colliding with
+      `"user_token"`) — confirmed a stale row from an earlier session already existed under that
+      exact key, validating the approach before writing a line of new code. The `/auth/ebay/token`
+      endpoint itself is now a thin wrapper around the same helper — identical response shape,
+      verified by import + AST check, not just eyeballed.
+    - **`services/cassini.py`** (new): `resolve_category(db, title)` (Taxonomy —
+      `get_default_category_tree_id`, in-process-cached since it's ~constant per marketplace, then
+      `get_category_suggestions`, top match) and `get_aspects(db, category_id, tree_id,
+      category_name)` (Metadata — `get_item_aspects_for_category`, normalized and cached via
+      `category_aspects`). Both wrapped so **any** failure (missing creds, 403, timeout, malformed
+      response) degrades to `None`/`{}` rather than raising — Cassini enriches, never blocks.
+      `CASSINI_ENABLED` (default true) short-circuits both with zero eBay calls when off.
+    - **Wired into the generator:** `_category_aspects()` in `listing_generator.py` (async now)
+      resolves title → category → aspects and returns `{required, recommended, allowed_values}` or
+      `{}`. Prompt dynamically instructs the AI to fill every required aspect (using allowed values
+      where given) when Cassini resolves something, falls back to the old honest general-judgement
+      wording otherwise. **Defense-in-depth added beyond the original plan:** wrapped the
+      `cassini.*` calls in `_category_aspects()` in their own try/except too, so even a hypothetical
+      future bug in `cassini.py` that bypasses its own internal catch still can't break generation —
+      proved with a test that makes `resolve_category` raise directly and confirms generation still
+      returns 200.
+    - **14 new tests** (`tests/test_cassini.py` — parsing, cache-hit-makes-zero-further-calls,
+      stale-cache-refetches, 403/no-creds/disabled all degrade to `None` with zero network calls,
+      app-token reused across both `resolve_category`+`get_aspects` (exactly one `oauth2/token` POST
+      proven by call-count assertion); `tests/test_listings_gen.py` +3 — prompt includes the exact
+      required-aspects/allowed-values text when Cassini resolves something, honest fallback wording
+      when it doesn't, and the defense-in-depth raise-survival case). **78/78 total pass**, real
+      `arbitrage.db` confirmed byte-unchanged. No test file imports `main`/calls `load_dotenv()`, so
+      `EBAY_CLIENT_ID` stays unset during the suite — the pre-existing generate-listing tests stay
+      fully hermetic (zero live calls) even with Cassini now wired in for real.
+    - **Sandbox-live-verified (2026-07-10, operator-run curls, `LISTING_PROVIDER=mock` so listing
+      *text* was mock but the Cassini fetch was 100% real sandbox eBay):** created a real candidate
+      ("Wireless Bluetooth Earbuds"), scored it (mock), generated twice.
+      - **Category resolved for real:** `112529`/`80077` suggestions from item 14's recon — this
+        run landed on `80077` "Headsets".
+      - **Real aspects fetched and cached:** `category_aspects` got exactly 1 row for `80077` with
+        **21 real aspects** (huge realistic `Brand` allowed-value list, etc.) — not empty, not a
+        stub.
+      - **App token confirmed working, not `user_token`:** the app-token row's `expires_at` jumped
+        to a fresh ~2h-out value seconds before the aspects fetch — a real mint succeeded.
+      - **Cache genuinely hit on the second generate:** `category_aspects.fetched_at` for `80077`
+        stayed at the *first* call's timestamp (02:27:39) even though the second generate happened
+        24s later (02:28:03) — proves zero repeat `get_item_aspects_for_category` calls. Same for
+        the app token (`expires_at` unchanged across both calls — reused from cache, not re-minted).
+      - **One real finding along the way, diagnosed and explained, not a bug:** the stored listing's
+        `item_specifics` still showed the generic `{"Brand": "Unbranded", "Condition": "New"}`
+        after all this — looked like a silent Cassini failure at first glance. Root cause:
+        `MockProvider.complete()` (`services/model_providers.py:200-233`) is a **hardcoded stub, not
+        an LLM** — it only checks whether the literal string `"item_specifics"` appears anywhere in
+        the system prompt (always true, it's baked into the fixed schema instruction) and then
+        always returns the same fixed dict, regardless of what Cassini actually injected. Confirmed
+        via `event_log` (zero `cassini_error` rows in the whole test window) and the cache evidence
+        above that Cassini itself ran and succeeded end-to-end — the generic output is purely a
+        `LISTING_PROVIDER=mock` test-harness artifact. **To see item_specifics actually reflect real
+        Cassini aspects, generation needs to run against a real provider** (Anthropic/Kimi/OpenAI) —
+        not required for Cassini's own correctness, which this round fully proved.
+    - **Not done (deliberately out of scope this round):** no resolved-category column added to
+      `generated_listings` (task called it optional; the `category_aspects` cache already records
+      what was resolved, used in-prompt only). Publish (§4A.6), ZIK integration untouched. Not
+      pushed to origin (per instruction — commit only).
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

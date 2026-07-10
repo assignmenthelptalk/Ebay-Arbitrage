@@ -90,7 +90,7 @@ async def _generate_and_store(candidate: Candidate, db: Session) -> dict:
     after one failure. Unlike scoring, this does NOT touch candidate.status —
     a generated draft is additive, not a candidate-status transition."""
     latest_margin = _latest_margin(db, candidate.id)
-    result = await generate_listing(candidate, latest_margin)
+    result = await generate_listing(db, candidate, latest_margin)
     if not result["ok"]:
         return result
 

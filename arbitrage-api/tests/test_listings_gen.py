@@ -288,6 +288,76 @@ def test_approve_without_draft_is_fine_and_reports_listing_null(client):
     assert data["listing"] is None
 
 
+async def _fake_resolve_category(db, title):
+    return {"category_id": "112529", "category_name": "Headphones", "tree_id": "0"}
+
+
+async def _fake_get_aspects(db, category_id, tree_id, category_name=""):
+    return [
+        {"name": "Brand", "required": True, "allowed_values": ["Sony", "Bose"]},
+        {"name": "Color", "required": False, "allowed_values": []},
+    ]
+
+
+async def _fake_resolve_category_none(db, title):
+    return None
+
+
+def test_generate_listing_prompt_includes_cassini_required_aspects(client, monkeypatch):
+    """When Cassini resolves a category + aspects, the prompt must name the
+    required aspects (and allowed values) so the AI fills what eBay
+    actually rewards — assert on the exact prompt text sent to the provider."""
+    candidate_id = _make_scored_candidate(client)
+    fake = _FakeProvider(result=CANNED_LISTING)
+    monkeypatch.setattr(listing_generator, "get_provider", lambda *a, **kw: fake)
+    monkeypatch.setattr(listing_generator.cassini, "resolve_category", _fake_resolve_category)
+    monkeypatch.setattr(listing_generator.cassini, "get_aspects", _fake_get_aspects)
+
+    resp = client.post(f"/candidates/{candidate_id}/generate-listing", headers=HEADERS)
+    assert resp.status_code == 200
+
+    assert "Headphones" in fake.last_user_content
+    assert "REQUIRED item specifics for this category: ['Brand']" in fake.last_user_content
+    assert "Recommended item specifics: ['Color']" in fake.last_user_content
+    assert "Sony" in fake.last_user_content
+    assert "resolved a specific category" in fake.last_system_prompt
+
+
+def test_generate_listing_prompt_falls_back_when_cassini_unavailable(client, monkeypatch):
+    """No EBAY_CLIENT_ID/SECRET set in the test env, so cassini short-circuits
+    to {} with zero network calls — generation must still succeed and use the
+    honest general-judgement wording, not crash or hang."""
+    candidate_id = _make_scored_candidate(client)
+    fake = _FakeProvider(result=CANNED_LISTING)
+    monkeypatch.setattr(listing_generator, "get_provider", lambda *a, **kw: fake)
+
+    resp = client.post(f"/candidates/{candidate_id}/generate-listing", headers=HEADERS)
+    assert resp.status_code == 200
+    assert "No category-required item specifics available" in fake.last_user_content
+    assert "No eBay category-specific required item specifics are available" in fake.last_system_prompt
+
+
+def test_generate_listing_survives_cassini_raising_unexpectedly(client, monkeypatch):
+    """Defense-in-depth: even if cassini.resolve_category raises directly
+    (bypassing its own internal try/except), the generator's own guard must
+    still degrade gracefully rather than 500ing — generation never breaks
+    on a Cassini failure."""
+    candidate_id = _make_scored_candidate(client)
+    fake = _FakeProvider(result=CANNED_LISTING)
+    monkeypatch.setattr(listing_generator, "get_provider", lambda *a, **kw: fake)
+
+    async def _raise(db, title):
+        raise RuntimeError("simulated cassini bug")
+
+    monkeypatch.setattr(listing_generator.cassini, "resolve_category", _raise)
+
+    resp = client.post(f"/candidates/{candidate_id}/generate-listing", headers=HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == CANNED_LISTING["title"]
+    assert "No category-required item specifics available" in fake.last_user_content
+
+
 def test_real_arbitrage_db_untouched_by_suite():
     current = REAL_DB_PATH.stat().st_mtime_ns if REAL_DB_PATH.exists() else None
     assert current == _real_db_snapshot, "listings_gen tests must not modify the real arbitrage.db"

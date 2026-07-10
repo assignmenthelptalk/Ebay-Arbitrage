@@ -156,9 +156,10 @@ class ScoringPrior(Base):
 class GeneratedListing(Base):
     """AI-drafted eBay listing (§4A.4). Multiple rows per candidate allowed
     (regeneration history) — the most recent row for a candidate is current.
-    Cassini-provided required item specifics are NOT fetched yet (see the
-    `_category_aspects` stub in services/listing_generator.py) — item_specifics
-    here are general/plausible only until that's wired up."""
+    item_specifics reflects eBay's real Cassini-rewarded required/recommended
+    aspects when a category was resolved (see services/cassini.py); falls
+    back to general/plausible specifics if resolution/fetch failed or the
+    feature is disabled (CASSINI_ENABLED=false)."""
 
     __tablename__ = "generated_listings"
 
@@ -179,6 +180,23 @@ class GeneratedListing(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CategoryAspects(Base):
+    """Cached eBay Taxonomy/Metadata item aspects per category (§4A.4 Cassini
+    socket). One row per category_id — aspects rarely change, so a row is
+    reused until `fetched_at` is older than CASSINI_ASPECTS_TTL_DAYS, then
+    refetched and updated in place rather than duplicated."""
+
+    __tablename__ = "category_aspects"
+
+    id = Column(Integer, primary_key=True)
+    category_id = Column(String, unique=True, nullable=False, index=True)
+    category_name = Column(String)
+    tree_id = Column(String, nullable=False)
+    aspects = Column(JSON, default=list)  # [{name, required, allowed_values}]
+    fetched_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class EventLog(Base):
