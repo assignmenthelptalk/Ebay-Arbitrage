@@ -499,6 +499,40 @@ reviewed/edited by a human (§4A.5/§4A.4) — entirely in a browser, entirely f
 provider is deliberately switched on. What remains for the *outbound* loop is Publish (§4A.6) alone,
 which is intentionally a production/go-live step. Everything before publish is done.
 
+14. **Cassini/Taxonomy sandbox recon (2026-07-10, read-only, no code changed).** Answered whether
+    eBay's Taxonomy/Metadata APIs are usable in sandbox before building the `_category_aspects()`
+    stub in `listing_generator.py` (item 13). **Verdict: sandbox serves full real data — build +
+    fully test Cassini enrichment now, no need to defer to production.**
+    - **Auth gotcha found first:** the stored `client_id="user_token"` (3-legged User token, used
+      for Sell Fulfillment) got a flat **403 "Access denied" (errorId 1100)** on
+      `get_default_category_tree_id`, even though `_SELL_SCOPES` in `auth.py` already includes the
+      base `https://api.ebay.com/oauth/api_scope` that Taxonomy's docs say is sufficient. eBay's
+      error body never names the missing scope (no `WWW-Authenticate` header either) — indistinguishable
+      from a real sandbox-data gap without a second probe.
+    - **Second probe (client-credentials app token, same `EBAY_CLIENT_ID`/`SECRET`, scope
+      `oauth/api_scope`) → 200 on every call.** Confirms Taxonomy/Metadata are Application-token
+      endpoints in practice; the existing User token (however it was scoped/minted via the sandbox
+      "Get a Token" tool) just isn't the right credential for them. **This is a token-type/config
+      fix, not a sandbox limitation** — `ebay_client.fetch_token()` already knows how to mint this
+      app token, it's just never been wired to a caller other than the OAuth bootstrap.
+    - **Taxonomy — works, real data:** `get_default_category_tree_id?marketplace_id=EBAY_US` →
+      `categoryTreeId="0"`, version 134. `get_category_suggestions?q=wireless+earbuds` → sensible
+      real categories (`112529` Headphones, `80077` Headsets, `48705` Headsets & Earpieces, with full
+      ancestor paths) — auto title→category mapping works in sandbox today.
+    - **Metadata (item aspects) — works, real data, THE key question:**
+      `get_item_aspects_for_category?category_id=112529` → 200, **27 aspects**, each with
+      `localizedAspectName`, `aspectConstraint.aspectRequired`, `aspectMode`, and real allowed-value
+      lists. Required: `Brand`, `Color`, `Connectivity`, `Model`, `Type`. Optional: `Features`,
+      `Form Factor`, `Microphone Type`, etc. — exactly the per-category rewarded specifics Cassini
+      enrichment needs to fill.
+    - **Not like `getTrafficReport`'s 404** (item 8 above) — that was a genuine sandbox
+      data-infrastructure gap on the Analytics API. Taxonomy/Metadata sandbox data is populated and
+      real, once called with the right token type.
+    - **Follow-up for whoever builds Cassini:** mint/cache an Application (client-credentials) token
+      for these calls rather than reusing `user_token` — either a small dedicated helper in
+      `ebay_client.py`, or extend `_call()`'s token selection. Read-only investigation only; no code
+      changed this round.
+
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
 Production go-live additionally needs: production keyset (separate from the sandbox app used here),
