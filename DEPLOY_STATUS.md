@@ -610,6 +610,58 @@ which is intentionally a production/go-live step. Everything before publish is d
       `generated_listings` (task called it optional; the `category_aspects` cache already records
       what was resolved, used in-prompt only). Publish (§4A.6), ZIK integration untouched. Not
       pushed to origin (per instruction — commit only).
+16. **Competitor-sourcing layer 1 (§4A.7) — BUILT + LIVE-VERIFIED (2026-07-10).** New
+    `competitor_scans` table + columns on `competitor_listings` (scan_id, watch_count,
+    competing_sellers, price_min/median/spread, saturation_level, demand_level, demand_confidence,
+    velocity_signal, selected, promoted, candidate_id) and `awaiting_amazon_cost` on `candidates`.
+    - **`POST /competitors/scan`** (seller_username + required query/category_id → Browse API via
+      the app token, paginated), **`GET /competitors/scan/{id}`**, **`GET /competitors/listings`**
+      (filter by scan_id, sort by saturation/demand/price), **`POST
+      /competitors/listings/{id}/promote`** (with amazon_cost → margin gate; without →
+      `awaiting_amazon_cost`, distinct from a margin-fail, cleared on later reevaluation).
+      `services/competitor_signals.py`: `compute_saturation` (red/yellow/green from competing-seller
+      count + price spread), `compute_demand` (low/med/high + honest confidence label — labeled
+      "ESTIMATE... not measured demand" since Browse has no watch/sold-count field), `velocity_stub`
+      (dormant pending scan history — real velocity needs ≥2 scans over time, deferred).
+    - **Key finding from the build:** the *old* pre-existing scan endpoint never worked live — it
+      called Browse with `q="a"`, which eBay rejects (errorId 12001 with `filter=sellers` alone,
+      12023 "response too large" for an unqualified `q`, both observed live 2026-06-15). The 5 old
+      `competitor_listings` rows were synthetic test fixtures, not real scan output. This build's
+      `POST /competitors/scan` requires a real `query`/`category_id`, fixing the root cause.
+    - **101 tests pass** (`tests/test_competitor_signals.py` + `tests/test_competitors.py`, new),
+      real `arbitrage.db` confirmed byte-identical before live testing (md5 `19ada41f...`).
+    - **First live scan (2026-07-10, seller `junyanlove`, query `"electronics"`, sandbox) hit a
+      real bug, not a sandbox limitation:** clean 200 from Browse (proving the q-fix works — first
+      real competitor scan ever to run on this system), 500 items returned across 5 pages, but the
+      item-processing loop that follows had **zero error handling** (unlike the token-fetch and
+      Browse-search calls earlier in the same function, which both log to `event_log` and return a
+      clean 4xx/5xx). Root cause, confirmed via `sudo journalctl`:
+      `sqlite3.IntegrityError: UNIQUE constraint failed: competitor_listings.item_id` — eBay's
+      sandbox doesn't really paginate (same catalog page repeats regardless of `offset`), so the
+      same `item_id` (e.g. `v1|110589695191|0`) appeared across multiple "pages"; the existing-row
+      dedup check only sees *committed* rows, not other new rows already added earlier in the same
+      uncommitted session, so the second insert of the same `item_id` collided at `db.commit()` and
+      threw unhandled → silent 500, no `event_log` row, scan row committed but zero listings
+      persisted.
+    - **Fix (three parts):** (1) `services/ebay_client.py` `search_seller_listings` now tracks
+      `seen_item_ids` across pages and stops paginating early once a page's ids are a subset of
+      what's already been collected — turns sandbox's repeat-catalog quirk into an early exit
+      instead of wasted calls. (2) `routers/competitors.py`'s item-processing loop now tracks its
+      own `seen_item_ids` and skips both empty/missing `item_id`s and in-batch duplicates before
+      ever calling `db.add()` — the actual guard against the constraint collision, defense-in-depth
+      even if upstream dedup somehow misses something. (3) The entire item-processing-through-commit
+      block (previously bare) is now wrapped in `try/except Exception`, matching the existing
+      pattern elsewhere in the function: `db.rollback()`, `log_event(db, "api_error", ...)`, then a
+      clean `HTTPException(500, ...)` instead of an unhandled crash.
+    - **Re-verified live after the fix (2026-07-10, same seller/query):** clean 200, no 500,
+      distinct `item_id`s deduplicated and persisted (489 new rows, `competitor_listings` 5→494),
+      `saturation_level="green"` and `demand_level="low"`/`demand_confidence="med"` computed and
+      stored per listing, `velocity_signal="dormant_pending_scan_history"` as expected (no scan
+      history yet to compute real velocity from). Layer 1 proven live end-to-end.
+    - **Deferred (not this round):** Amazon reverse-lookup / auto-matching a competitor listing to
+      an Amazon source, and real velocity computation (needs ≥2 scans of the same seller over time
+      to diff against — this build's schema/snapshot history is what makes that possible later, but
+      computing it is out of scope here). Not pushed to origin (per instruction — commit only).
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

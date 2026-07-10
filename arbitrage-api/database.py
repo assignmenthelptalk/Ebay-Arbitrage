@@ -28,6 +28,21 @@ def _migrate(engine):
         "ALTER TABLE orders ADD COLUMN sale_price REAL",
         "ALTER TABLE orders ADD COLUMN buyer_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN line_item_id VARCHAR",
+        # §4A.7 layer 1 — competitor-sourcing scan signals + promote linkage.
+        "ALTER TABLE competitor_listings ADD COLUMN scan_id INTEGER",
+        "ALTER TABLE competitor_listings ADD COLUMN watch_count INTEGER",
+        "ALTER TABLE competitor_listings ADD COLUMN competing_sellers INTEGER",
+        "ALTER TABLE competitor_listings ADD COLUMN price_min REAL",
+        "ALTER TABLE competitor_listings ADD COLUMN price_median REAL",
+        "ALTER TABLE competitor_listings ADD COLUMN price_spread REAL",
+        "ALTER TABLE competitor_listings ADD COLUMN saturation_level VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN demand_level VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN demand_confidence VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN velocity_signal VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN selected BOOLEAN DEFAULT 0",
+        "ALTER TABLE competitor_listings ADD COLUMN promoted BOOLEAN DEFAULT 0",
+        "ALTER TABLE competitor_listings ADD COLUMN candidate_id INTEGER",
+        "ALTER TABLE candidates ADD COLUMN awaiting_amazon_cost BOOLEAN DEFAULT 0",
     ]
     with engine.connect() as conn:
         for sql in migrations:

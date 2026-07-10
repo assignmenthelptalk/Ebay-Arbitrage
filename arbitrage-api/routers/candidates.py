@@ -11,7 +11,7 @@ from services import margin_engine
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
-VALID_SOURCES = {"zik", "browse_auto", "manual_amazon", "manual_csv", "manual_form"}
+VALID_SOURCES = {"zik", "browse_auto", "manual_amazon", "manual_csv", "manual_form", "competitor_scan"}
 
 
 class IntakeRequest(BaseModel):
@@ -31,7 +31,7 @@ class RejectRequest(BaseModel):
     reason: Optional[str] = None
 
 
-NOT_APPROVABLE_STATUSES = {"rejected", "rejected_margin", "scoring_failed"}
+NOT_APPROVABLE_STATUSES = {"rejected", "rejected_margin", "scoring_failed", "awaiting_amazon_cost"}
 
 
 def _margin_calc_to_dict(m: MarginCalc) -> dict:
@@ -265,6 +265,10 @@ def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Sess
     candidate.amazon_cost = payload.amazon_cost
     if payload.sale_price is not None:
         candidate.sale_price = payload.sale_price
+    # A real cost has now been entered — this is how an awaiting_amazon_cost
+    # candidate (from a promoted competitor listing with no cost yet, see
+    # routers/competitors.py) becomes a normal margin-gated candidate.
+    candidate.awaiting_amazon_cost = False
 
     margin_calc = _run_margin_and_store(db, candidate, candidate.sale_price, candidate.amazon_cost)
 

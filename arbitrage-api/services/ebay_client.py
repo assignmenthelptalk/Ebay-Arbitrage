@@ -421,23 +421,156 @@ async def add_shipping_fulfillment(
     return resp.json() if resp.content else {}
 
 
+def _parse_item_summary(item: dict, fallback_seller: str) -> dict:
+    price_info = item.get("price", {})
+    return {
+        "item_id": item.get("itemId", ""),
+        "title": item.get("title", ""),
+        "price": float(price_info.get("value", 0)),
+        "currency": price_info.get("currency", "GBP"),
+        "condition": item.get("condition", ""),
+        "image_url": (item.get("image") or {}).get("imageUrl", ""),
+        "seller": (item.get("seller") or {}).get("username", fallback_seller),
+        # Browse's item_summary/search response has no watchCount/sold-count
+        # field at all (confirmed against live error-log history + eBay's
+        # documented ItemSummary schema — see DEPLOY_STATUS.md item 16).
+        # Stays null; would need a per-item getItem call to populate, which
+        # is out of scope for layer 1.
+        "watch_count": None,
+    }
+
+
 async def search_seller_listings(
     token: str,
     username: str,
-    marketplace: str = "EBAY_GB",
-) -> list[dict]:
+    query: str | None = None,
+    category_id: str | None = None,
+    marketplace: str | None = None,
+    max_pages: int = 5,
+    page_size: int = 100,
+) -> dict:
+    """Enumerate a seller's items via Browse search (app token).
+
+    Browse's search endpoint requires `q` and/or `category_ids` — filter=sellers
+    alone 400s (errorId 12001, observed live 2026-06-15), and an unqualified
+    generic keyword is rejected outright rather than just capped (errorId
+    12023 "response too large to return", also observed live 2026-06-15 with
+    q="a"). There is no universally-safe fallback query, so the caller must
+    supply `query` and/or `category_id` — enforced by the router before this
+    is called.
+
+    Paginates up to `max_pages` * `page_size` items (eBay's own Browse-wide
+    cap is far higher, ~10k, but we bound it here to keep one scan call
+    bounded). Returns {"items": [...], "total_reported": eBay's own `total`
+    match count (int or None), "capped": True if max_pages was exhausted
+    before all reported results were retrieved}.
+    """
     env = os.getenv("EBAY_ENV", "sandbox")
     base = _API_BASE[env]
+    mp = marketplace or os.getenv("EBAY_MARKETPLACE", "EBAY_GB")
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": marketplace,
+        "X-EBAY-C-MARKETPLACE-ID": mp,
     }
-    params = {
-        "q": "a",
+
+    base_params: dict[str, str] = {
         "filter": f"sellers:{{{username}}}",
-        "limit": "20",
+        "limit": str(page_size),
     }
+    if query:
+        base_params["q"] = query
+    if category_id:
+        base_params["category_ids"] = category_id
+
+    items: list[dict] = []
+    seen_item_ids: set[str] = set()
+    total_reported: int | None = None
+    capped = False
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for page in range(max_pages):
+            params = dict(base_params)
+            params["offset"] = str(page * page_size)
+
+            resp = await client.get(
+                f"{base}/buy/browse/v1/item_summary/search",
+                headers=headers,
+                params=params,
+            )
+            if resp.status_code == 429:
+                await asyncio.sleep(2)
+                resp = await client.get(
+                    f"{base}/buy/browse/v1/item_summary/search",
+                    headers=headers,
+                    params=params,
+                )
+
+            if resp.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"eBay Browse API {resp.status_code}: {resp.text}",
+                    request=resp.request,
+                    response=resp,
+                )
+
+            data = resp.json()
+            total_reported = data.get("total", total_reported)
+            page_items = data.get("itemSummaries", [])
+            if not page_items:
+                break
+
+            parsed = [_parse_item_summary(item, username) for item in page_items]
+            page_item_ids = {p["item_id"] for p in parsed if p["item_id"]}
+            if page_item_ids and page_item_ids <= seen_item_ids:
+                # Sandbox has been observed returning the same catalog page
+                # regardless of offset (no real pagination) — a page with no
+                # item_ids we haven't already seen means there's nothing left
+                # to gain by paginating further.
+                break
+            seen_item_ids |= page_item_ids
+
+            items.extend(parsed)
+
+            if len(page_items) < page_size:
+                break
+        else:
+            # Loop ran out of pages without a short final page — more items
+            # may exist beyond what we fetched.
+            if total_reported is not None and len(items) < total_reported:
+                capped = True
+
+    return {"items": items, "total_reported": total_reported, "capped": capped}
+
+
+async def search_competing_sellers(
+    token: str,
+    query: str,
+    marketplace: str | None = None,
+    exclude_seller: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """One-page Browse keyword search (no seller filter) to estimate how many
+    OTHER sellers compete on a given product, plus their price spread. A
+    single page of eBay's relevance-ranked results is a SAMPLE, not an
+    exhaustive market census — good enough for a directional saturation
+    signal, not a claim of measuring the whole market.
+
+    Returns {"competing_sellers": int, "price_min": float|None,
+    "price_median": float|None, "price_spread": float|None,
+    "sample_size": int, "total_reported": int|None}. Raises on Browse
+    errors — the caller decides how to degrade gracefully (this function
+    doesn't swallow failures, since silently returning zeros would look
+    like a real "no competition" reading).
+    """
+    env = os.getenv("EBAY_ENV", "sandbox")
+    base = _API_BASE[env]
+    mp = marketplace or os.getenv("EBAY_MARKETPLACE", "EBAY_GB")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": mp,
+    }
+    params = {"q": query, "limit": str(limit)}
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -445,10 +578,8 @@ async def search_seller_listings(
             headers=headers,
             params=params,
         )
-
-    if resp.status_code == 429:
-        await asyncio.sleep(2)
-        async with httpx.AsyncClient(timeout=30) as client:
+        if resp.status_code == 429:
+            await asyncio.sleep(2)
             resp = await client.get(
                 f"{base}/buy/browse/v1/item_summary/search",
                 headers=headers,
@@ -463,16 +594,41 @@ async def search_seller_listings(
         )
 
     data = resp.json()
-    items = []
+    total_reported = data.get("total")
+
+    sellers: set[str] = set()
+    prices: list[float] = []
     for item in data.get("itemSummaries", []):
-        price_info = item.get("price", {})
-        items.append({
-            "item_id": item.get("itemId", ""),
-            "title": item.get("title", ""),
-            "price": float(price_info.get("value", 0)),
-            "currency": price_info.get("currency", "GBP"),
-            "condition": item.get("condition", ""),
-            "image_url": (item.get("image") or {}).get("imageUrl", ""),
-            "seller": (item.get("seller") or {}).get("username", username),
-        })
-    return items
+        seller_name = (item.get("seller") or {}).get("username")
+        if exclude_seller and seller_name == exclude_seller:
+            continue
+        if seller_name:
+            sellers.add(seller_name)
+        price_val = (item.get("price") or {}).get("value")
+        if price_val is not None:
+            prices.append(float(price_val))
+
+    if not prices:
+        return {
+            "competing_sellers": len(sellers),
+            "price_min": None,
+            "price_median": None,
+            "price_spread": None,
+            "sample_size": 0,
+            "total_reported": total_reported,
+        }
+
+    prices.sort()
+    n = len(prices)
+    price_min = prices[0]
+    price_max = prices[-1]
+    price_median = prices[n // 2] if n % 2 == 1 else (prices[n // 2 - 1] + prices[n // 2]) / 2
+
+    return {
+        "competing_sellers": len(sellers),
+        "price_min": price_min,
+        "price_median": price_median,
+        "price_spread": price_max - price_min,
+        "sample_size": n,
+        "total_reported": total_reported,
+    }

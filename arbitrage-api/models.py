@@ -15,6 +15,22 @@ class Token(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class CompetitorScan(Base):
+    """One row per competitor-sourcing scan RUN (§4A.7 layer 1). This is the
+    snapshot history that lets a future seller-velocity signal accrue once
+    the same seller has been scanned repeatedly over weeks — velocity itself
+    is NOT computed yet, this table just makes it possible later."""
+
+    __tablename__ = "competitor_scans"
+
+    id = Column(Integer, primary_key=True)
+    seller_username = Column(String, nullable=False, index=True)
+    marketplace = Column(String, nullable=False)
+    scanned_at = Column(DateTime, default=datetime.utcnow)
+    listing_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CompetitorListing(Base):
     __tablename__ = "competitor_listings"
 
@@ -28,6 +44,34 @@ class CompetitorListing(Base):
     image_url = Column(String)
     marketplace = Column(String, default="EBAY_GB")
     scanned_at = Column(DateTime, default=datetime.utcnow)
+
+    # --- §4A.7 layer 1 additions below (nullable — old rows predate these) ---
+    scan_id = Column(Integer, ForeignKey("competitor_scans.id"), nullable=True, index=True)
+
+    # Demand signal inputs. watch_count stays null in layer 1 — Browse's
+    # search endpoint doesn't return it (see DEPLOY_STATUS.md item 16); the
+    # column exists so a future per-item detail call can populate it without
+    # another migration.
+    watch_count = Column(Integer, nullable=True)
+
+    # Saturation signal inputs — from a separate keyword search per listing,
+    # not the seller-filtered scan search.
+    competing_sellers = Column(Integer, nullable=True)
+    price_min = Column(Float, nullable=True)
+    price_median = Column(Float, nullable=True)
+    price_spread = Column(Float, nullable=True)
+
+    saturation_level = Column(String, nullable=True)   # red | yellow | green
+    demand_level = Column(String, nullable=True)        # low | med | high
+    demand_confidence = Column(String, nullable=True)   # low | med | high
+
+    # Dormant stub — needs multiple competitor_scans rows for this seller
+    # over time to compute. Always null in layer 1.
+    velocity_signal = Column(String, nullable=True)
+
+    selected = Column(Boolean, default=False, nullable=False)
+    promoted = Column(Boolean, default=False, nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=True)
 
 
 class Listing(Base):
@@ -73,12 +117,19 @@ class Candidate(Base):
     __tablename__ = "candidates"
 
     id = Column(Integer, primary_key=True)
-    source = Column(String, nullable=False)  # zik | browse_auto | manual_amazon | manual_csv | manual_form
+    source = Column(String, nullable=False)  # zik | browse_auto | manual_amazon | manual_csv | manual_form | competitor_scan
     asin = Column(String)
     title = Column(String)
     sale_price = Column(Float, nullable=False)
     amazon_cost = Column(Float, nullable=False)
     status = Column(String, default="pending_review", nullable=False)
+
+    # §4A.7 layer 1: promoting a competitor listing without a manually-entered
+    # Amazon cost yet. amazon_cost stays NOT NULL (stored as 0.0 placeholder)
+    # so the existing column constraint is untouched — this flag is what
+    # actually marks the candidate as pending cost entry, not margin-failed.
+    awaiting_amazon_cost = Column(Boolean, default=False, nullable=False)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
