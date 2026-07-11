@@ -659,9 +659,38 @@ which is intentionally a production/go-live step. Everything before publish is d
       stored per listing, `velocity_signal="dormant_pending_scan_history"` as expected (no scan
       history yet to compute real velocity from). Layer 1 proven live end-to-end.
     - **Deferred (not this round):** Amazon reverse-lookup / auto-matching a competitor listing to
-      an Amazon source, and real velocity computation (needs ≥2 scans of the same seller over time
-      to diff against — this build's schema/snapshot history is what makes that possible later, but
-      computing it is out of scope here). Not pushed to origin (per instruction — commit only).
+      an Amazon source. Real velocity computation was deferred here but built in the next round —
+      see item 17.
+
+17. **Real seller-velocity computation (§4A.7 layer 1 activation) — BUILT + LIVE-VERIFIED
+    (2026-07-11).** `competitor_listing_snapshots` table (`services/competitor_signals.py`:
+    `normalize_product_key`, `find_prior_appearances`, `compute_velocity`) plus
+    `velocity_level`/`velocity_confidence`/`velocity_detail` columns on `competitor_listings`.
+    `routers/competitors.py`'s `_compute_and_store_velocity` runs after saturation/demand per scan:
+    groups the scan's rows by product_key, looks up each product's snapshot history for that
+    seller, computes presence ratio (seen/total scans → persistent/intermittent/transient) plus
+    seller-count and price trend against the most recent prior appearance, and writes one snapshot
+    row per product-group so future scans can diff against it. 124/124 tests pass
+    (`test_competitor_signals.py` + `test_competitors.py` extended).
+    - **Live bug found and fixed during verification, not a rebuild:** the first live re-scan of
+      `junyanlove` (scan 5) computed the iPhone 7 as "2/5 intermittent, high confidence" instead of
+      the expected "2/2 persistent, low confidence." Root cause: `total_seller_scans` counted every
+      `competitor_scans` row for the seller (`id <= scan.id`), including 3 scans from *before* this
+      feature existed (the `item_id` UNIQUE-crash debugging runs from item 16) that have zero
+      snapshot rows for anything — they inflated the denominator without ever being able to
+      register "seen." Fixed by counting only scans with ≥1 snapshot row for that seller
+      (`prior_instrumented_scans` distinct on `competitor_listing_snapshots.scan_id`, `+1` for the
+      current scan) instead of every historical scan row. Re-verified live after the fix and after
+      a full `systemctl restart` (uvicorn has no `--reload`, so the fix wasn't live until restarted):
+      scan 6 computed the iPhone 7 as **"3/3 persistent, confidence=med, sellers 0→0 flat, price
+      38.88→39.03 (small rise — sandbox catalog jitter between calls, not a real signal)"** — 3/3
+      not 2/2 because the interim verification scan (5) itself added a real data point; this is
+      expected, matches the tested design (`test_second_scan_of_same_seller_computes_persistent_velocity`).
+    - `ecom-sniffer/content_ebay.js`'s scan button updated to match the `POST /competitors/scan`
+      contract (`seller_username` singular + required `query`, prompted via `window.prompt`) — was
+      still sending the old `seller_usernames`/hardcoded-marketplace shape from before item 16's fix.
+    - **Deferred (not this round):** Amazon reverse-lookup / auto-matching a competitor listing to
+      an Amazon source. Not pushed to origin (per instruction — commit only).
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.

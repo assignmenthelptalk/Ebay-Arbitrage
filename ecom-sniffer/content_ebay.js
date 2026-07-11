@@ -76,9 +76,20 @@
       result.textContent = '';
       result.className = 'result';
 
+      const query = window.prompt(
+        "What kind of product are you sourcing from this seller? (eBay's Browse API requires a keyword — a blank/too-generic search is rejected)"
+      );
+      if (!query) {
+        btn.disabled = false;
+        btn.textContent = 'Scan with Ecom Sniffer';
+        result.className = 'result err';
+        result.textContent = '✗ Scan needs a search keyword';
+        return;
+      }
+
       const res = await apiRequest('POST', '/competitors/scan', {
-        seller_usernames: [seller],
-        marketplace: 'EBAY_GB',
+        seller_username: seller,
+        query,
       });
 
       btn.disabled = false;

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Candidate, CompetitorListing, CompetitorScan
+from models import Candidate, CompetitorListing, CompetitorListingSnapshot, CompetitorScan
 from routers.candidates import _candidate_to_dict, _latest_margin, _latest_score, _run_margin_and_store
 from services import competitor_signals
 from services.ebay_client import get_cached_app_token, search_competing_sellers, search_seller_listings
@@ -30,6 +30,30 @@ class ScanRequest(BaseModel):
 
 class PromoteRequest(BaseModel):
     amazon_cost: Optional[float] = None
+
+
+def _velocity_response(row: CompetitorListing) -> dict:
+    # Unlike saturation/demand, velocity's inputs span OTHER rows in OTHER
+    # scans — recomputing on every GET would mean re-querying scan history
+    # per row. So it's computed once at scan time (_compute_and_store_velocity)
+    # and read back here from the stored columns, same as sort_by=saturation
+    # already reads the stored saturation_level column directly.
+    detail = row.velocity_detail
+    if not detail or detail.get("confidence") == "dormant":
+        # True dormant (or a legacy pre-migration row with no detail stored)
+        # — identical shape to the original stub, unchanged for old consumers.
+        return competitor_signals.velocity_stub()
+
+    return {
+        "level": detail.get("level"),
+        "signal": row.velocity_signal,
+        "confidence": detail.get("confidence"),
+        "product_key": detail.get("product_key"),
+        "presence": detail.get("presence"),
+        "seller_velocity": detail.get("seller_velocity"),
+        "price_velocity": detail.get("price_velocity"),
+        "reason": detail.get("reason"),
+    }
 
 
 def _row_to_dict(row: CompetitorListing) -> dict:
@@ -56,7 +80,7 @@ def _row_to_dict(row: CompetitorListing) -> dict:
         "watch_count": row.watch_count,
         "saturation": saturation,
         "demand": demand,
-        "velocity": competitor_signals.velocity_stub(),
+        "velocity": _velocity_response(row),
         "selected": row.selected,
         "promoted": row.promoted,
         "candidate_id": row.candidate_id,
@@ -95,7 +119,82 @@ async def _compute_and_store_signals(
     demand = competitor_signals.compute_demand(listing_row.watch_count, listing_row.competing_sellers)
     listing_row.demand_level = demand["level"]
     listing_row.demand_confidence = demand["confidence"]
-    listing_row.velocity_signal = competitor_signals.VELOCITY_STUB
+
+
+def _compute_and_store_velocity(db: Session, rows: list[CompetitorListing], scan: CompetitorScan, seller: str) -> None:
+    """Velocity pass — runs AFTER saturation/demand are stored for the scan's
+    rows. Groups this scan's listings by product_key (multiple item_ids can
+    be the same product — see §4A.7 design), computes one velocity result per
+    group, and copies it onto every row in that group."""
+    # Counts scans that actually wrote snapshot data, not every CompetitorScan
+    # row ever — a seller can have earlier scans that predate this feature (or
+    # crashed before persisting anything), and those can't have "seen" any
+    # product. Counting them would inflate the denominator and silently drag
+    # a genuinely persistent product down to "intermittent" with inflated
+    # confidence. +1 accounts for the current scan, whose own snapshot rows
+    # haven't been written yet at this point in the pass (see below).
+    prior_instrumented_scans = (
+        db.query(CompetitorListingSnapshot.scan_id)
+        .filter(CompetitorListingSnapshot.seller == seller, CompetitorListingSnapshot.scan_id < scan.id)
+        .distinct()
+        .count()
+    )
+    total_seller_scans = prior_instrumented_scans + 1
+
+    groups: dict[str, list[CompetitorListing]] = {}
+    for row in rows:
+        groups.setdefault(row.product_key or "", []).append(row)
+
+    for product_key, group in groups.items():
+        if not product_key:
+            # No usable title to key on — matching would be a guess, so this
+            # product-group is left without a velocity reading entirely
+            # rather than risking a false match via an empty shared key.
+            for row in group:
+                row.velocity_level = None
+                row.velocity_confidence = None
+                row.velocity_detail = None
+                row.velocity_signal = competitor_signals.VELOCITY_STUB
+            continue
+
+        prices = [r.price for r in group if r.price is not None]
+        sellers = [r.competing_sellers for r in group if r.competing_sellers is not None]
+        current_product = {
+            "product_key": product_key,
+            "price": round(sum(prices) / len(prices), 2) if prices else None,
+            "competing_sellers": round(sum(sellers) / len(sellers)) if sellers else None,
+        }
+
+        prior = competitor_signals.find_prior_appearances(db, seller, product_key, scan.id)
+        velocity = competitor_signals.compute_velocity(current_product, prior, total_seller_scans)
+
+        # Write this scan's own snapshot AFTER reading prior appearances (it
+        # isn't its own prior) so future scans can find it. Written here
+        # rather than in CompetitorListing, which upserts in place per
+        # item_id and would erase this data on the next scan of an item that
+        # keeps the same item_id (see CompetitorListingSnapshot docstring).
+        db.add(
+            CompetitorListingSnapshot(
+                scan_id=scan.id,
+                seller=seller,
+                product_key=product_key,
+                price=current_product["price"],
+                competing_sellers=current_product["competing_sellers"],
+            )
+        )
+
+        if velocity["confidence"] == "dormant":
+            signal = competitor_signals.VELOCITY_STUB
+        elif velocity["confidence"] == "new":
+            signal = competitor_signals.VELOCITY_NEW
+        else:
+            signal = velocity["level"]
+
+        for row in group:
+            row.velocity_level = velocity["level"]
+            row.velocity_confidence = velocity["confidence"]
+            row.velocity_detail = velocity
+            row.velocity_signal = signal
 
 
 @router.post("/scan")
@@ -178,6 +277,7 @@ async def scan_competitor(payload: ScanRequest, db: Session = Depends(get_db)):
                 .filter(CompetitorListing.item_id == item_id)
                 .first()
             )
+            product_key = competitor_signals.normalize_product_key(item["title"])
             if existing:
                 existing.seller = payload.seller_username
                 existing.title = item["title"]
@@ -189,6 +289,7 @@ async def scan_competitor(payload: ScanRequest, db: Session = Depends(get_db)):
                 existing.scanned_at = now
                 existing.scan_id = scan.id
                 existing.watch_count = item.get("watch_count")
+                existing.product_key = product_key
             else:
                 db.add(
                     CompetitorListing(
@@ -203,6 +304,7 @@ async def scan_competitor(payload: ScanRequest, db: Session = Depends(get_db)):
                         scanned_at=now,
                         scan_id=scan.id,
                         watch_count=item.get("watch_count"),
+                        product_key=product_key,
                     )
                 )
         db.commit()
@@ -221,6 +323,9 @@ async def scan_competitor(payload: ScanRequest, db: Session = Depends(get_db)):
         # need batching/parallelism if scans grow to hundreds of listings.
         for row in rows:
             await _compute_and_store_signals(db, row, token, marketplace, payload.seller_username)
+        db.commit()
+
+        _compute_and_store_velocity(db, rows, scan, payload.seller_username)
         db.commit()
     except Exception as exc:
         db.rollback()

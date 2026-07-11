@@ -192,6 +192,55 @@ def test_scan_populates_saturation_and_demand_signals(app_client, monkeypatch):
     assert listing["velocity"]["signal"] == "dormant_pending_scan_history"
 
 
+def test_second_scan_of_same_seller_computes_persistent_velocity(app_client, monkeypatch):
+    seller_items = [_item("v1|900|0", "Rare Gadget", 30.0, "sellerZ")]
+    _patch_browse(monkeypatch, seller_items)  # 3 competing sellers, prices unchanged each call
+
+    first = app_client.post(
+        "/competitors/scan", json={"seller_username": "sellerZ", "query": "gadgets"}, headers=HEADERS
+    )
+    first_listing = first.json()["listings"][0]
+    assert first_listing["velocity"]["signal"] == "dormant_pending_scan_history"
+
+    second = app_client.post(
+        "/competitors/scan", json={"seller_username": "sellerZ", "query": "gadgets"}, headers=HEADERS
+    )
+    assert second.status_code == 200
+    velocity = second.json()["listings"][0]["velocity"]
+
+    assert velocity["signal"] != "dormant_pending_scan_history"
+    assert velocity["confidence"] == "low"  # 2nd scan of this seller
+    assert velocity["presence"]["seen"] == 2
+    assert velocity["presence"]["total"] == 2
+    assert velocity["presence"]["label"] == "persistent"
+    assert velocity["level"] == "persistent"
+    # sandbox/mocked responses are identical across calls -> flat, not fabricated
+    assert velocity["seller_velocity"]["trend"] == "flat"
+    assert velocity["price_velocity"]["trend"] == "flat"
+
+
+def test_multiple_listings_of_same_product_share_one_velocity_reading(app_client, monkeypatch):
+    # 3 item_ids, same product (title) — the live iPhone 7 case (§4A.7 design).
+    seller_items = [
+        _item("v1|910|0", "iPhone 7 32GB", 100.0, "sellerZ"),
+        _item("v1|911|0", "iPhone 7 32GB", 110.0, "sellerZ"),
+        _item("v1|912|0", "iPhone 7 32GB", 90.0, "sellerZ"),
+    ]
+    _patch_browse(monkeypatch, seller_items)
+
+    app_client.post("/competitors/scan", json={"seller_username": "sellerZ", "query": "iphone"}, headers=HEADERS)
+    second = app_client.post(
+        "/competitors/scan", json={"seller_username": "sellerZ", "query": "iphone"}, headers=HEADERS
+    )
+    listings = second.json()["listings"]
+    assert len(listings) == 3
+    velocities = [item["velocity"] for item in listings]
+    # Every listing in the group gets the identical computed velocity result.
+    assert all(v["level"] == velocities[0]["level"] for v in velocities)
+    assert all(v["presence"] == velocities[0]["presence"] for v in velocities)
+    assert velocities[0]["presence"]["label"] == "persistent"
+
+
 def test_scan_degrades_gracefully_when_competing_seller_search_fails(app_client, monkeypatch):
     seller_items = [_item("v1|300|0", "Flaky Item", 15.0, "sellerZ")]
 

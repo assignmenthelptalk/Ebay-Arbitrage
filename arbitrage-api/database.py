@@ -39,6 +39,11 @@ def _migrate(engine):
         "ALTER TABLE competitor_listings ADD COLUMN demand_level VARCHAR",
         "ALTER TABLE competitor_listings ADD COLUMN demand_confidence VARCHAR",
         "ALTER TABLE competitor_listings ADD COLUMN velocity_signal VARCHAR",
+        # §4A.7 velocity signal (layer 1 activation) — product-level matching key
+        "ALTER TABLE competitor_listings ADD COLUMN product_key VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN velocity_level VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN velocity_confidence VARCHAR",
+        "ALTER TABLE competitor_listings ADD COLUMN velocity_detail JSON",
         "ALTER TABLE competitor_listings ADD COLUMN selected BOOLEAN DEFAULT 0",
         "ALTER TABLE competitor_listings ADD COLUMN promoted BOOLEAN DEFAULT 0",
         "ALTER TABLE competitor_listings ADD COLUMN candidate_id INTEGER",

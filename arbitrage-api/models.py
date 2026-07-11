@@ -48,6 +48,12 @@ class CompetitorListing(Base):
     # --- §4A.7 layer 1 additions below (nullable — old rows predate these) ---
     scan_id = Column(Integer, ForeignKey("competitor_scans.id"), nullable=True, index=True)
 
+    # §4A.7 velocity — normalized product key (see
+    # services.competitor_signals.normalize_product_key), populated at scan
+    # time for every listing regardless of whether history exists yet, so
+    # future scans of the same seller can match against it.
+    product_key = Column(String, nullable=True, index=True)
+
     # Demand signal inputs. watch_count stays null in layer 1 — Browse's
     # search endpoint doesn't return it (see DEPLOY_STATUS.md item 16); the
     # column exists so a future per-item detail call can populate it without
@@ -69,9 +75,41 @@ class CompetitorListing(Base):
     # over time to compute. Always null in layer 1.
     velocity_signal = Column(String, nullable=True)
 
+    # §4A.7 velocity (layer 1 activation) — computed once per product-key
+    # group at scan time and copied onto every row in that group (see
+    # routers.competitors._compute_and_store_velocity). velocity_detail holds
+    # the full compute_velocity() breakdown; level/confidence mirror
+    # saturation_level/demand_level so sort_by=velocity can read them
+    # directly without deserializing JSON.
+    velocity_level = Column(String, nullable=True)
+    velocity_confidence = Column(String, nullable=True)
+    velocity_detail = Column(JSON, nullable=True)
+
     selected = Column(Boolean, default=False, nullable=False)
     promoted = Column(Boolean, default=False, nullable=False)
     candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=True)
+
+
+class CompetitorListingSnapshot(Base):
+    """Per-scan, per-product history for seller-velocity (§4A.7). Separate
+    from CompetitorListing on purpose: CompetitorListing is unique per
+    item_id and gets upserted in place when a still-active listing is
+    rescanned with the SAME item_id (see routers.competitors.scan_competitor)
+    — which would silently overwrite that item's scan_id and erase the prior
+    scan's price/competing_sellers before find_prior_appearances ever sees it.
+    This table adds one row per (scan, product_key) every scan regardless of
+    whether item_ids repeated (still-active) or changed (relist), so
+    find_prior_appearances always has real history to match against."""
+
+    __tablename__ = "competitor_listing_snapshots"
+
+    id = Column(Integer, primary_key=True)
+    scan_id = Column(Integer, ForeignKey("competitor_scans.id"), nullable=False, index=True)
+    seller = Column(String, nullable=False, index=True)
+    product_key = Column(String, nullable=False, index=True)
+    price = Column(Float, nullable=True)
+    competing_sellers = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Listing(Base):
