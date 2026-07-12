@@ -10,8 +10,9 @@ Two copies of the app on the VPS (13.140.171.246):
   section) until explicitly retired.
 - **`/home/jobizi/ebay-arbitrage`** — the git clone with the NEW code. **NOW LIVE as of Phase 4**
   (port 8000, systemd `arbitrage-api.service`, `User=root`,
-  `EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env`). Committed locally, still **not
-  pushed** to origin.
+  `EnvironmentFile=/home/jobizi/ebay-arbitrage/arbitrage-api/.env`). As of 2026-07-12, `origin/main`
+  is up to date through `02d6d2e` (item 18) — see that item's push note; check `git log @{u}..`
+  before trusting this if picking the doc back up later.
 
 Phase 4 (cutover) is complete and verified. API-only — Telegram approver not yet repointed/started
 (separate later step, item 7 below).
@@ -690,7 +691,7 @@ which is intentionally a production/go-live step. Everything before publish is d
       contract (`seller_username` singular + required `query`, prompted via `window.prompt`) — was
       still sending the old `seller_usernames`/hardcoded-marketplace shape from before item 16's fix.
     - **Deferred (not this round):** Amazon reverse-lookup / auto-matching a competitor listing to
-      an Amazon source. Not pushed to origin (per instruction — commit only).
+      an Amazon source. Pushed to origin 2026-07-12 alongside item 18 (`237e29e`..`02d6d2e`).
 
 18. **Two-phase scan refactor (§4A.7 refinement) — BUILT + LIVE-VERIFIED (2026-07-12).** Fixed the
     root cause of the scan fragility that had been dogging item 16/17's live-verification passes all
@@ -758,7 +759,9 @@ which is intentionally a production/go-live step. Everything before publish is d
       than crashing or fabricating a trend — the bridging case the real-reading-fallback fix was
       built for.
     - **Not done (deliberately out of scope):** Amazon reverse-lookup / auto-matching still deferred
-      (unchanged from item 16/17). Not pushed to origin (per instruction — commit only).
+      (unchanged from item 16/17). **Pushed to origin 2026-07-12** — `git push origin main` sent
+      `237e29e`..`02d6d2e` (this refactor plus items 16/17's previously-uncommitted-upstream work) in
+      one push; `origin/main` was current through `02d6d2e` as of this update.
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
