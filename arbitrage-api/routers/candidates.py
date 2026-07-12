@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -7,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Candidate, GeneratedListing, MarginCalc, Score
-from services import margin_engine
+from services import amazon_search, margin_engine
+from services.event_logger import log_event
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -25,6 +27,12 @@ class IntakeRequest(BaseModel):
 class ReevaluateRequest(BaseModel):
     amazon_cost: float
     sale_price: Optional[float] = None
+    # Amazon search-assist paste-back (§4C.2 replacement): the human matched a
+    # real Amazon product by hand (see services/amazon_search.py) and pastes
+    # its ASIN back here alongside the cost. Recording it is the audit trail
+    # of WHICH Amazon product this cost came from, and it's what powers the
+    # existing amazon.com/dp/{asin} link in the dashboard.
+    asin: Optional[str] = None
 
 
 class RejectRequest(BaseModel):
@@ -32,6 +40,13 @@ class RejectRequest(BaseModel):
 
 
 NOT_APPROVABLE_STATUSES = {"rejected", "rejected_margin", "scoring_failed", "awaiting_amazon_cost"}
+
+# Real Amazon ASINs are exactly 10 alphanumeric characters. This is a sanity
+# check only, not a validator — a human just matched the product by hand
+# (that's the whole point of §4C.2), so an odd-shaped paste is logged for the
+# audit trail, not rejected. Rejecting would punish a human for a typo in the
+# one place this system trusts human judgment most.
+_ASIN_SANITY_RE = re.compile(r"^[A-Za-z0-9]{10}$")
 
 
 def _margin_calc_to_dict(m: MarginCalc) -> dict:
@@ -104,6 +119,8 @@ def _candidate_to_dict(
         "sale_price": c.sale_price,
         "amazon_cost": c.amazon_cost,
         "status": c.status,
+        "awaiting_amazon_cost": c.awaiting_amazon_cost,
+        "amazon_search_url": amazon_search.build_amazon_search_url(c.title) if c.title else None,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "margin": _margin_calc_to_dict(latest_margin) if latest_margin else None,
@@ -262,9 +279,26 @@ def get_candidate(candidate_id: int, db: Session = Depends(get_db)):
 def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Session = Depends(get_db)):
     candidate = _get_candidate_or_404(db, candidate_id)
 
+    if payload.amazon_cost <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": True, "message": "amazon_cost must be greater than 0", "code": 400},
+        )
+
     candidate.amazon_cost = payload.amazon_cost
     if payload.sale_price is not None:
         candidate.sale_price = payload.sale_price
+
+    if payload.asin is not None:
+        asin = payload.asin.strip()
+        if asin and not _ASIN_SANITY_RE.match(asin):
+            log_event(
+                db,
+                "asin_format_warning",
+                detail=f"Candidate {candidate.id} paste-back ASIN '{asin}' doesn't look like a real ASIN (10 alphanumeric chars) — stored anyway, human-matched.",
+            )
+        candidate.asin = asin or None
+
     # A real cost has now been entered — this is how an awaiting_amazon_cost
     # candidate (from a promoted competitor listing with no cost yet, see
     # routers/competitors.py) becomes a normal margin-gated candidate.

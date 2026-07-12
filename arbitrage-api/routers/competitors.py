@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import Candidate, CompetitorListing, CompetitorListingSnapshot, CompetitorScan
 from routers.candidates import _candidate_to_dict, _latest_margin, _latest_score, _run_margin_and_store
-from services import competitor_signals
+from services import amazon_search, competitor_signals
 from services.ebay_client import get_cached_app_token, search_competing_sellers, search_seller_listings
 from services.event_logger import log_event
 
@@ -103,6 +103,7 @@ def _row_to_dict(row: CompetitorListing) -> dict:
         "scanned_at": row.scanned_at.isoformat() if row.scanned_at else None,
         "watch_count": row.watch_count,
         "enriched_at": row.enriched_at.isoformat() if row.enriched_at else None,
+        "amazon_search_url": amazon_search.build_amazon_search_url(row.title),
         "saturation": saturation,
         "demand": demand,
         "velocity": _velocity_response(row),

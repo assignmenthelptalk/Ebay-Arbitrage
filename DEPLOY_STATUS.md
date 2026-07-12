@@ -763,6 +763,55 @@ which is intentionally a production/go-live step. Everything before publish is d
       `237e29e`..`02d6d2e` (this refactor plus items 16/17's previously-uncommitted-upstream work) in
       one push; `origin/main` was current through `02d6d2e` as of this update.
 
+19. **Amazon search-assist (§4C.2 replacement) — BUILT + LIVE-VERIFIED (2026-07-12).** Fast MANUAL
+    Amazon sourcing for `awaiting_amazon_cost` candidates. **NO auto-matching, by deliberate
+    decision:** there is no legitimate Amazon data source available (PA API is gated behind sales
+    history this dormant account doesn't have; scraping is off the table; Keepa costs money and
+    isn't wanted), and an auto-matcher's worst failure mode — a confidently-WRONG match producing a
+    precise-but-false margin that flows straight through the scorer/dashboard/approval — is more
+    dangerous than the manual click this replaces, at this volume. The human matches the product by
+    eye; that's what keeps the cost honest.
+    - **`services/amazon_search.py`** (new) — pure string builder, `clean_title_for_search()` +
+      `build_amazon_search_url(title, upc=None)`. No `httpx`/`requests` import in the module, on
+      purpose — a network call to Amazon is structurally impossible from this code, not just
+      avoided by convention. Strips emoji/condition/shipping/marketing noise phrases and excess
+      punctuation, caps query length, falls back to the raw title rather than ever returning a
+      blank query. Wired as a **computed** field, `amazon_search_url`, into both
+      `_candidate_to_dict` (`routers/candidates.py`) and `_row_to_dict` (`routers/competitors.py`);
+      `awaiting_amazon_cost` also newly exposed as a real boolean on the candidate response.
+    - **Paste-back reuses the existing `POST /candidates/{id}/reevaluate`** — no new endpoint, no
+      migration (`Candidate.asin` already existed). Added `asin` (stripped; sanity-checked as
+      10-alphanumeric but **never rejected** on a mismatch — logs `asin_format_warning` instead,
+      since a human just matched this by hand and rejecting would punish a typo in the one place
+      the system trusts human judgment most) and an `amazon_cost > 0` guard (400). Saving a real
+      cost is what flips an `awaiting_amazon_cost` candidate (from a promoted competitor listing
+      with no cost yet) into a normal margin-gated one.
+    - **`candidates.html`** — `awaiting_amazon_cost` status filter + amber badge/row tint;
+      `NOT_APPROVABLE` promoted to a shared top-level const (now includes
+      `awaiting_amazon_cost`, matching the backend so Approve is unavailable on these rows).
+      Awaiting rows render a paste-back block instead of the normal margin/score columns: a
+      **"Find on Amazon →"** link (new tab, pre-filled cleaned-title search) + eBay title/price
+      context + ASIN + cost inputs + Save, calling the same reevaluate endpoint.
+    - **17 new tests** (151 total, up from 135): `tests/test_amazon_search.py` (10 — no-network-call
+      proof, UPC-vs-title preference, noise-stripping, all-noise/empty-title fallback, URL encoding,
+      word cap) + `tests/test_candidates.py` (6 — `amazon_search_url` exposure, cost>0 guard,
+      pass/fail paste-back flows end-to-end through the margin gate, odd-shaped ASIN stored not
+      rejected, omitting `asin` preserves the existing value).
+    - **Live-verified (2026-07-12, operator-run, real browser + real sandbox eBay data):** promoted
+      a competitor listing with no cost via `POST /competitors/listings/{id}/promote` (empty body)
+      → landed as `awaiting_amazon_cost`, carried a correct `amazon_search_url`. Same
+      restart-required lesson as items 8/17 recurred — the running service still had the
+      pre-edit module loaded (last restart 07-11 21:11, code edited 07-12 02:48–03:05), so the
+      first promote response was missing `amazon_search_url` until `sudo systemctl restart
+      arbitrage-api.service`. Post-restart, in the dashboard: amber-tinted `awaiting_amazon_cost`
+      row rendered with the paste-back block; **clicking "Find on Amazon →" surfaced the real
+      product** (cleaned-title query worked as intended); pasted back a real ASIN + cost → margin
+      calculated correctly, `awaiting_amazon_cost` cleared, row updated to a normal margin-gated
+      state. Both **Approve** and **Reject** exercised live afterward on separate candidates —
+      both paths confirmed working.
+    - **Not done:** not pushed to origin (per instruction — commit only). Committed alongside its
+      tests and the `candidates.html` changes; `.env`/`arbitrage.db` excluded as always.
+
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
 Production go-live additionally needs: production keyset (separate from the sandbox app used here),

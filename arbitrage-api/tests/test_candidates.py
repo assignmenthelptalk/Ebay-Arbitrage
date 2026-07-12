@@ -61,6 +61,29 @@ def _set_status(client, candidate_id: int, status: str) -> None:
         db.close()
 
 
+def _make_awaiting_candidate(client, title: str = "iPhone 7", sale_price: float = 50.0) -> int:
+    # Mirrors what routers/competitors.py's promote_listing does for a
+    # promote-without-cost — competitors.router isn't mounted in this test
+    # app (see module docstring above), so awaiting_amazon_cost candidates
+    # are built directly here rather than via a real promote call.
+    db = client.SessionLocal()
+    try:
+        candidate = Candidate(
+            source="competitor_scan",
+            title=title,
+            sale_price=sale_price,
+            amazon_cost=0.0,
+            status="awaiting_amazon_cost",
+            awaiting_amazon_cost=True,
+        )
+        db.add(candidate)
+        db.commit()
+        db.refresh(candidate)
+        return candidate.id
+    finally:
+        db.close()
+
+
 def test_intake_passing_product_stores_pending_review(client):
     expected = margin_engine.evaluate_margin(50.0, 20.0)
     assert expected.passed is True  # sanity: this case must actually pass the gate
@@ -255,6 +278,118 @@ def test_reject_is_idempotent_and_reject_of_rejected_margin_allowed(client):
     second = client.post(f"/candidates/{candidate_id}/reject", json={}, headers=HEADERS)
     assert second.status_code == 200
     assert second.json()["status"] == "rejected"
+
+
+def test_candidate_response_includes_amazon_search_url(client):
+    resp = client.post(
+        "/candidates",
+        json={
+            "source": "manual_amazon",
+            "sale_price": 50.0,
+            "amazon_cost": 20.0,
+            "title": "Brand New Sealed Apple iPhone 7 32GB Free Shipping",
+        },
+        headers=HEADERS,
+    )
+    data = resp.json()
+    assert data["amazon_search_url"].startswith("https://www.amazon.com/s?k=")
+    assert "iPhone" in data["amazon_search_url"]
+    assert "Brand" not in data["amazon_search_url"]
+
+
+def test_reevaluate_rejects_non_positive_cost(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "sale_price": 50.0, "amazon_cost": 20.0},
+        headers=HEADERS,
+    ).json()
+
+    zero = client.post(
+        f"/candidates/{created['id']}/reevaluate", json={"amazon_cost": 0}, headers=HEADERS
+    )
+    assert zero.status_code == 400
+
+    negative = client.post(
+        f"/candidates/{created['id']}/reevaluate", json={"amazon_cost": -5}, headers=HEADERS
+    )
+    assert negative.status_code == 400
+
+    # rejected attempts must not have touched the candidate's stored cost
+    detail = client.get(f"/candidates/{created['id']}", headers=HEADERS).json()
+    assert detail["amazon_cost"] == 20.0
+
+
+def test_pasteback_pass_case_clears_awaiting_and_stores_asin(client):
+    candidate_id = _make_awaiting_candidate(client, sale_price=50.0)
+
+    expected = margin_engine.evaluate_margin(50.0, 20.0)
+    assert expected.passed is True  # sanity: this case must actually pass the gate
+
+    resp = client.post(
+        f"/candidates/{candidate_id}/reevaluate",
+        json={"amazon_cost": 20.0, "asin": "B000123456"},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["awaiting_amazon_cost"] is False
+    assert data["asin"] == "B000123456"
+    assert data["status"] == "pending_review"
+    assert data["margin"]["passed"] is True
+
+    detail = client.get(f"/candidates/{candidate_id}", headers=HEADERS).json()
+    assert detail["awaiting_amazon_cost"] is False
+    assert detail["asin"] == "B000123456"
+    assert len(detail["margin_history"]) == 1
+
+
+def test_pasteback_fail_case_sets_rejected_margin_but_still_clears_awaiting(client):
+    candidate_id = _make_awaiting_candidate(client, sale_price=25.0)
+
+    expected = margin_engine.evaluate_margin(25.0, 18.0)
+    assert expected.passed is False  # sanity: this case must actually fail the gate
+
+    resp = client.post(
+        f"/candidates/{candidate_id}/reevaluate",
+        json={"amazon_cost": 18.0, "asin": "B000999999"},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "rejected_margin"
+    assert data["awaiting_amazon_cost"] is False
+    assert data["asin"] == "B000999999"
+
+
+def test_pasteback_odd_asin_format_stored_not_rejected(client):
+    candidate_id = _make_awaiting_candidate(client, sale_price=50.0)
+
+    resp = client.post(
+        f"/candidates/{candidate_id}/reevaluate",
+        json={"amazon_cost": 20.0, "asin": "not-a-real-asin!"},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["asin"] == "not-a-real-asin!"
+
+
+def test_reevaluate_omitting_asin_key_preserves_existing_asin(client):
+    candidate_id = _make_awaiting_candidate(client, sale_price=50.0)
+
+    client.post(
+        f"/candidates/{candidate_id}/reevaluate",
+        json={"amazon_cost": 20.0, "asin": "B000123456"},
+        headers=HEADERS,
+    )
+
+    # Second reevaluate omits "asin" entirely (the dashboard's paste-back form
+    # does this when the ASIN input is left blank) — must not clear the ASIN
+    # already recorded.
+    resp = client.post(
+        f"/candidates/{candidate_id}/reevaluate", json={"amazon_cost": 22.0}, headers=HEADERS
+    )
+    assert resp.status_code == 200
+    assert resp.json()["asin"] == "B000123456"
 
 
 def test_real_arbitrage_db_untouched_by_suite():

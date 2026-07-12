@@ -74,6 +74,7 @@ tbody tr { border-bottom: 1px solid var(--border); vertical-align: top; }
 tbody tr:last-child { border-bottom: none; }
 tbody tr.st-approved { background: rgba(63,185,80,.05); }
 tbody tr.st-rejected, tbody tr.st-rejected_margin { background: rgba(248,81,73,.04); }
+tbody tr.st-awaiting_amazon_cost { background: rgba(210,153,34,.07); }
 tbody tr:hover { background: rgba(255,255,255,0.03); }
 td { padding: 9px 12px; }
 .mono { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; color: var(--muted); }
@@ -85,6 +86,7 @@ td { padding: 9px 12px; }
 .b-pending_review  { background: rgba(88,166,255,.15);  color: #58a6ff; }
 .b-scored          { background: rgba(188,140,255,.15); color: #bc8cff; }
 .b-scoring_failed  { background: rgba(210,153,34,.15);  color: #d29922; }
+.b-awaiting_amazon_cost { background: rgba(210,153,34,.15); color: #d29922; }
 .b-approved        { background: rgba(63,185,80,.15);   color: #3fb950; }
 .b-rejected        { background: rgba(248,81,73,.15);   color: #f85149; }
 .b-rejected_margin { background: rgba(248,81,73,.12);   color: #f85149; }
@@ -115,6 +117,17 @@ td { padding: 9px 12px; }
   width: 72px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
   color: var(--text); font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; padding: 4px 6px;
 }
+
+.pasteback { display: flex; flex-direction: column; gap: 6px; min-width: 190px; }
+.pasteback-context { font-size: 11px; color: var(--muted); }
+.pasteback-context .pb-price { color: var(--text); font-weight: 600; }
+.pasteback-row { display: flex; gap: 4px; align-items: center; }
+.pasteback-row input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; padding: 4px 6px;
+}
+.pasteback-row .pasteback-asin { width: 90px; }
+.pasteback-row .pasteback-cost { width: 64px; }
 .row-msg { font-size: 11px; margin-top: 2px; }
 .row-msg.ok { color: var(--green); }
 .row-msg.err { color: var(--red); }
@@ -184,6 +197,7 @@ a.asin-link:hover { text-decoration: underline; }
       <option value="">All</option>
       <option value="pending_review">pending_review</option>
       <option value="scored">scored</option>
+      <option value="awaiting_amazon_cost">awaiting_amazon_cost</option>
       <option value="approved">approved</option>
       <option value="rejected">rejected</option>
       <option value="rejected_margin">rejected_margin</option>
@@ -263,7 +277,7 @@ function mgClass(pct) {
 
 function badge(status) {
   const s = String(status ?? 'unknown').toLowerCase();
-  const known = new Set(['pending_review','scored','approved','rejected','rejected_margin','scoring_failed']);
+  const known = new Set(['pending_review','scored','approved','rejected','rejected_margin','scoring_failed','awaiting_amazon_cost']);
   const cls = known.has(s) ? s : 'unknown';
   return `<span class="badge b-${cls}">${esc(status ?? 'unknown')}</span>`;
 }
@@ -366,12 +380,34 @@ function renderListingCell(c) {
   </div>`;
 }
 
+// Mirrors the backend's NOT_APPROVABLE_STATUSES (routers/candidates.py) —
+// awaiting_amazon_cost has no real margin yet (amazon_cost is a 0.0
+// placeholder, see routers/competitors.py promote_listing), so approving it
+// would lock in a fabricated margin. Keep this set in sync with the backend.
+const NOT_APPROVABLE = new Set(['rejected', 'rejected_margin', 'scoring_failed', 'awaiting_amazon_cost']);
+
 function renderActions(c) {
-  const canApprove = !['rejected', 'rejected_margin', 'scoring_failed'].includes(c.status);
   const asinLink = c.asin
     ? `<a class="asin-link" href="https://www.amazon.com/dp/${encodeURIComponent(c.asin)}" target="_blank" rel="noopener">Amazon ↗</a>`
     : '<span class="muted">no ASIN</span>';
 
+  if (c.awaiting_amazon_cost) {
+    const title = c.title || '(untitled)';
+    const findHref = c.amazon_search_url || 'https://www.amazon.com/s';
+    return `<div class="row-actions pasteback" data-id="${c.id}">
+      <a class="btn btn-blue" href="${esc(findHref)}" target="_blank" rel="noopener">Find on Amazon →</a>
+      <div class="pasteback-context">${esc(title.length > 40 ? title.slice(0,40)+'…' : title)} · <span class="pb-price">${money(c.sale_price)}</span></div>
+      <div class="pasteback-row">
+        <input type="text" class="pasteback-asin" placeholder="ASIN" maxlength="20">
+        <input type="number" step="0.01" min="0.01" class="pasteback-cost" placeholder="cost">
+        <button class="btn btn-green act-pasteback">Save</button>
+      </div>
+      <div class="btn-row"><button class="btn btn-red act-reject">Reject</button></div>
+      <div class="row-msg"></div>
+    </div>`;
+  }
+
+  const canApprove = !NOT_APPROVABLE.has(c.status);
   return `<div class="row-actions" data-id="${c.id}">
     <div class="btn-row">
       <button class="btn btn-green act-approve" ${canApprove ? '' : 'disabled'}>Approve</button>
@@ -409,14 +445,17 @@ function renderRow(c) {
   const buttons = tr.querySelectorAll('button');
   const lockRow = (locked) => buttons.forEach(b => b.disabled = locked);
 
-  tr.querySelector('.act-approve').onclick = async () => {
-    lockRow(true);
-    try {
-      await apiSend(`/candidates/${c.id}/approve`);
-      setMsg('Approved.', 'ok');
-      setTimeout(load, 600);
-    } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
-  };
+  const approveBtn = tr.querySelector('.act-approve');
+  if (approveBtn) {
+    approveBtn.onclick = async () => {
+      lockRow(true);
+      try {
+        await apiSend(`/candidates/${c.id}/approve`);
+        setMsg('Approved.', 'ok');
+        setTimeout(load, 600);
+      } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+    };
+  }
 
   tr.querySelector('.act-reject').onclick = async () => {
     lockRow(true);
@@ -427,17 +466,43 @@ function renderRow(c) {
     } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
   };
 
-  tr.querySelector('.act-reeval').onclick = async () => {
-    const input = tr.querySelector('.reeval-cost');
-    const newCost = Number(input.value);
-    if (!(newCost > 0)) { setMsg('Enter a valid cost.', 'err'); return; }
-    lockRow(true);
-    try {
-      await apiSend(`/candidates/${c.id}/reevaluate`, { amazon_cost: newCost });
-      setMsg('Re-evaluated.', 'ok');
-      setTimeout(load, 600);
-    } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
-  };
+  const reevalBtn = tr.querySelector('.act-reeval');
+  if (reevalBtn) {
+    reevalBtn.onclick = async () => {
+      const input = tr.querySelector('.reeval-cost');
+      const newCost = Number(input.value);
+      if (!(newCost > 0)) { setMsg('Enter a valid cost.', 'err'); return; }
+      lockRow(true);
+      try {
+        await apiSend(`/candidates/${c.id}/reevaluate`, { amazon_cost: newCost });
+        setMsg('Re-evaluated.', 'ok');
+        setTimeout(load, 600);
+      } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+    };
+  }
+
+  // Amazon search-assist paste-back (§4C.2 replacement): human opened "Find
+  // on Amazon" in a new tab, matched the product themselves, and pastes the
+  // ASIN + cost back here. Reuses the same /reevaluate endpoint as normal
+  // re-evaluation — clears awaiting_amazon_cost and runs the margin gate.
+  const pastebackBtn = tr.querySelector('.act-pasteback');
+  if (pastebackBtn) {
+    pastebackBtn.onclick = async () => {
+      const asinInput = tr.querySelector('.pasteback-asin');
+      const costInput = tr.querySelector('.pasteback-cost');
+      const cost = Number(costInput.value);
+      if (!(cost > 0)) { setMsg('Enter a valid cost.', 'err'); return; }
+      const asin = asinInput.value.trim();
+      lockRow(true);
+      try {
+        const body = { amazon_cost: cost };
+        if (asin) body.asin = asin;
+        await apiSend(`/candidates/${c.id}/reevaluate`, body);
+        setMsg('Saved — margin gate ran.', 'ok');
+        setTimeout(load, 600);
+      } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+    };
+  }
 
   const genBtn = tr.querySelector('.act-generate');
   if (genBtn) {
