@@ -48,6 +48,9 @@ def _migrate(engine):
         "ALTER TABLE competitor_listings ADD COLUMN promoted BOOLEAN DEFAULT 0",
         "ALTER TABLE competitor_listings ADD COLUMN candidate_id INTEGER",
         "ALTER TABLE candidates ADD COLUMN awaiting_amazon_cost BOOLEAN DEFAULT 0",
+        # §4A.7 two-phase scan refinement — cheap scan, enrich-on-select.
+        "ALTER TABLE competitor_listings ADD COLUMN same_seller_listing_count INTEGER",
+        "ALTER TABLE competitor_listings ADD COLUMN enriched_at DATETIME",
     ]
     with engine.connect() as conn:
         for sql in migrations:

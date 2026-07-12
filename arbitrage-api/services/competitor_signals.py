@@ -28,6 +28,9 @@ DEMAND_MED_MIN_WATCH = int(os.getenv("DEMAND_MED_MIN_WATCH", "5"))
 DEMAND_HIGH_MIN_SELLERS = int(os.getenv("DEMAND_HIGH_MIN_SELLERS", "5"))
 DEMAND_MED_MIN_SELLERS = int(os.getenv("DEMAND_MED_MIN_SELLERS", "1"))
 
+DEMAND_CHEAP_HIGH_MIN_LISTINGS = int(os.getenv("DEMAND_CHEAP_HIGH_MIN_LISTINGS", "5"))
+DEMAND_CHEAP_MED_MIN_LISTINGS = int(os.getenv("DEMAND_CHEAP_MED_MIN_LISTINGS", "2"))
+
 # Dormant marker stored on competitor_listings.velocity_signal. Real velocity
 # needs multiple competitor_scans rows for the same seller over weeks — the
 # snapshot history table exists for this (§4A.7), but nothing computes it yet.
@@ -131,6 +134,57 @@ def compute_demand(watch_count: int | None, competing_sellers: int | None) -> di
         "confidence": confidence,
         "components": {"watch_count": watch_count, "competing_sellers": competing_sellers},
         "reason": f"ESTIMATE from {basis}. Not measured demand.",
+    }
+
+
+def compute_demand_cheap(same_seller_listing_count: int | None) -> dict:
+    """Demand ESTIMATE available at cheap-scan time, before enrichment
+    (§4A.7 two-phase refinement) — the only free number at that point is how
+    many of THIS seller's own item_ids share the product (deeper own-stock
+    is a weak signal *something* is moving, not a market-demand measurement,
+    and much weaker than compute_demand's competing-seller proxy since it
+    only looks at one seller). Confidence is always 'low' here for that
+    reason — callers should prefer compute_demand once a product is
+    enriched (see routers.competitors._row_to_dict).
+    """
+    count = same_seller_listing_count or 0
+    if count >= DEMAND_CHEAP_HIGH_MIN_LISTINGS:
+        level = "high"
+    elif count >= DEMAND_CHEAP_MED_MIN_LISTINGS:
+        level = "med"
+    else:
+        level = "low"
+
+    return {
+        "level": level,
+        "confidence": "low",
+        "components": {"same_seller_listing_count": same_seller_listing_count},
+        "reason": (
+            f"ESTIMATE from {count} of this seller's own listing(s) for this product "
+            "(cheap pre-enrichment proxy — not competing-seller data, not measured demand)."
+        ),
+    }
+
+
+def saturation_pending() -> dict:
+    """Shape returned for a listing that hasn't been enriched yet (§4A.7
+    two-phase refinement) — distinct from compute_saturation(None, ...)'s
+    cautious-yellow, which means "enrichment ran but the lookup failed."
+    This means "enrichment hasn't run at all," so no level is fabricated,
+    not even a cautious default.
+    """
+    return {
+        "level": None,
+        "enriched": False,
+        "competing_sellers": None,
+        "price_min": None,
+        "price_median": None,
+        "price_spread": None,
+        "reason": (
+            "Not yet enriched — saturation needs a per-product competing-seller "
+            "lookup, deferred to selection (POST /competitors/listings/{id}/enrich "
+            "or /competitors/enrich) so scan stays cheap and fast."
+        ),
     }
 
 

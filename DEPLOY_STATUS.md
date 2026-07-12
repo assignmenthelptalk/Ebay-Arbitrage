@@ -692,6 +692,74 @@ which is intentionally a production/go-live step. Everything before publish is d
     - **Deferred (not this round):** Amazon reverse-lookup / auto-matching a competitor listing to
       an Amazon source. Not pushed to origin (per instruction — commit only).
 
+18. **Two-phase scan refactor (§4A.7 refinement) — BUILT + LIVE-VERIFIED (2026-07-12).** Fixed the
+    root cause of the scan fragility that had been dogging item 16/17's live-verification passes all
+    session: a live scan took *minutes* and once died mid-scan to a dropped connection, because scan
+    ran the expensive per-listing competing-seller Browse search (saturation's real cost) for every
+    single item up front, sequentially. Split into a cheap scan phase + an enrich-on-select phase.
+    - **Scan phase, now cheap:** `POST /competitors/scan` no longer calls `_compute_and_store_signals`
+      per row. It only does the Browse enumerate + dedup (`services/ebay_client.py`'s early-exit on
+      repeated `item_id`s, from item 16) plus a free in-memory `_compute_and_store_cheap_demand` pass
+      (`services/competitor_signals.py: compute_demand_cheap`) — demand ESTIMATE from same-seller
+      own-listing-count, always `confidence: "low"`, explicitly labeled as a weaker proxy than the
+      real competing-seller-based `compute_demand`. Velocity is unaffected (item 17's logic already
+      tolerates a missing seller-count). New `competitor_listings` columns: `same_seller_listing_count`,
+      `enriched_at` (migration in `database.py`).
+    - **Enrich phase, on select:** new `POST /competitors/listings/{id}/enrich` (single) and `POST
+      /competitors/enrich` (batch, body `{"listing_ids": [...]}`) run the real per-product
+      competing-seller search — `_enrich_listing` in `routers/competitors.py`, reusing
+      `_compute_and_store_signals` unchanged. Sets `enriched_at`, mirrors the raw saturation result
+      across every OTHER listing sharing the same `product_key` + seller (same product, no reason to
+      re-search), and updates that scan's `CompetitorListingSnapshot` row so future scans see a real
+      seller-count for velocity. Batch form runs up to 5 enrichments concurrently
+      (`asyncio.Semaphore(5)`), each on its own SQLAlchemy `Session` opened via `db.get_bind()` — not
+      a shared session (unsafe across concurrent units of work) and not a hardcoded
+      `database.SessionLocal` import (would bypass the `get_db` engine override tests/deployments
+      rely on).
+    - **Response shape now product-deduped, not row-deduped:** `GET /competitors/listings` and `GET
+      /competitors/scan/{id}` now group by `product_key` (`_group_by_product_key` /
+      `_dedup_product_dict`) — one entry per product, not one per `item_id`, since a seller can relist
+      the same product under multiple ids. Each entry carries `item_ids`/`listing_count`; the
+      "primary" (what enrich/promote act on) is the group's cheapest item_id. Price filters apply
+      before dedup so a product isn't hidden just because one of its other item_ids fell outside
+      range. `sort_by=saturation` removed (meaningless/absent for most rows pre-enrich); added
+      `sort_by=velocity`.
+    - **Rescan resets enrichment (approved design):** upserting an existing `item_id` on a fresh scan
+      now nulls `competing_sellers`/`price_min`/`price_median`/`price_spread`/`saturation_level`/
+      `enriched_at` — a fresh scan is a fresh competitive snapshot, showing a stale saturation reading
+      as current would be wrong, and re-enrichment is cheap now that it's on-select.
+    - **Seller-velocity fix (bug found during this round's live verification, not a rebuild):**
+      rescan unconditionally wiping `competing_sellers` back to pending meant the live per-scan
+      seller-count reading item 17 relied on was now *always* None at velocity-compute time (dead on
+      arrival for every scan going forward, not just an edge case) — velocity's seller-trend signal
+      would have silently stopped working the moment this refactor shipped. Fixed by having
+      `_compute_and_store_velocity` fall back to the two most recent REAL (non-null) snapshot
+      readings — skipping over any un-enriched scans in between — and diffing those instead of the
+      always-null live reading. With only one real reading ever recorded, `prev_sellers` is left
+      `None` rather than guessing (diffing a carried-forward reading against itself would fabricate a
+      false "flat" trend). The snapshot table itself still only ever stores a real measurement
+      (`live_sellers`), never a carried-forward fallback — enrich (`_enrich_listing`) is what keeps it
+      current going forward.
+    - **11 new/updated tests** (135 total, up from 124): cheap-scan demand estimate + confidence-low
+      labeling, dedup grouping (shared product_key collapses, no-key rows stay singleton, cheapest
+      item_id picked as primary, price filter applies pre-dedup), single + batch enrich (sibling
+      mirroring — verified via exactly one eBay call for N siblings, not N calls — snapshot update,
+      404 on missing listing), rescan-resets-enrichment, and the seller-velocity real-reading-fallback
+      case (`{0→0, flat}` bridging pre-refactor snapshot rows with no `competing_sellers` history).
+      135/135 pass.
+    - **Live-verified (2026-07-12, operator-run, real sandbox eBay):** rescan of `junyanlove`
+      (493 listings) completed in **~17 seconds** — down from the multi-minute, disconnect-fragile
+      scans in items 16/17 — because it no longer makes any per-listing Browse call. Pending listings
+      correctly showed `saturation: {level: null, enriched: false}` (the explicit pending shape, not a
+      fabricated cautious-yellow). Both single and batch enrich calls completed in ~2s each with real
+      saturation computed from a live Browse search. Sibling mirroring confirmed working with only
+      one eBay call serving multiple item_ids of the same product. `seller_velocity` on old
+      pre-refactor snapshot rows (no `competing_sellers` ever recorded) read as `{0→0, flat}` rather
+      than crashing or fabricating a trend — the bridging case the real-reading-fallback fix was
+      built for.
+    - **Not done (deliberately out of scope):** Amazon reverse-lookup / auto-matching still deferred
+      (unchanged from item 16/17). Not pushed to origin (per instruction — commit only).
+
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
 Production go-live additionally needs: production keyset (separate from the sandbox app used here),

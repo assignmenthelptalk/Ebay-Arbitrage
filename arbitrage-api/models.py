@@ -61,7 +61,9 @@ class CompetitorListing(Base):
     watch_count = Column(Integer, nullable=True)
 
     # Saturation signal inputs — from a separate keyword search per listing,
-    # not the seller-filtered scan search.
+    # not the seller-filtered scan search. Two-phase scan (§4A.7 refinement):
+    # these stay null until enrich runs (see enriched_at below) — scan itself
+    # no longer populates them, that's the whole point of the split.
     competing_sellers = Column(Integer, nullable=True)
     price_min = Column(Float, nullable=True)
     price_median = Column(Float, nullable=True)
@@ -70,6 +72,23 @@ class CompetitorListing(Base):
     saturation_level = Column(String, nullable=True)   # red | yellow | green
     demand_level = Column(String, nullable=True)        # low | med | high
     demand_confidence = Column(String, nullable=True)   # low | med | high
+
+    # Two-phase scan (§4A.7 refinement) — the only free "listing count"
+    # signal available at cheap-scan time without the expensive per-product
+    # competing-seller search: how many of THIS seller's own item_ids share
+    # this product_key in the same scan. Feeds compute_demand_cheap() as a
+    # recomputable raw number, same pattern saturation/demand already use.
+    same_seller_listing_count = Column(Integer, nullable=True)
+
+    # Two-phase scan — set only once the expensive saturation lookup has
+    # actually run for this row (POST /competitors/listings/{id}/enrich or
+    # the batch form). None means "not yet enriched" (services.competitor_
+    # signals.saturation_pending()), distinct from "enriched but the lookup
+    # failed" (competing_sellers stays None, enriched_at IS set — existing
+    # cautious-yellow degrade still applies). Reset to None on rescan of an
+    # existing item_id — a fresh scan means the competitive landscape could
+    # have moved, so a prior enrichment is stale, not current.
+    enriched_at = Column(DateTime, nullable=True)
 
     # Dormant stub — needs multiple competitor_scans rows for this seller
     # over time to compute. Always null in layer 1.
