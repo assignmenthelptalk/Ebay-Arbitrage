@@ -809,8 +809,68 @@ which is intentionally a production/go-live step. Everything before publish is d
       calculated correctly, `awaiting_amazon_cost` cleared, row updated to a normal margin-gated
       state. Both **Approve** and **Reject** exercised live afterward on separate candidates —
       both paths confirmed working.
-    - **Not done:** not pushed to origin (per instruction — commit only). Committed alongside its
-      tests and the `candidates.html` changes; `.env`/`arbitrage.db` excluded as always.
+    - **Pushed to origin** (confirmed 2026-07-12: `origin/main` == local `HEAD` == `00a4847`, nothing
+      ahead/behind). Committed alongside its tests and the `candidates.html` changes;
+      `.env`/`arbitrage.db` excluded as always.
+20. **ecom-sniffer extension "API error" — DIAGNOSED + FIXED (2026-07-12).** Root cause was
+    narrower than first suspected. `manifest.json` already declared `host_permissions` for the
+    API origin, and Chrome extensions with a declared host permission are exempt from CORS for
+    fetches made from extension contexts (background service worker/popup) — which is exactly why
+    `content_amazon.js`/`content_ebay.js` already proxy every call through
+    `chrome.runtime.sendMessage → background.js`'s `fetch()` rather than fetching directly from the
+    content script. **So `main.py` never needed `CORSMiddleware` — that suspicion was a red
+    herring, confirmed by reading the existing code, not fixed defensively.**
+    - **Actual cause:** `background.js`/`popup.js` hardcoded `API_BASE`/`DASHBOARD` to the VPS
+      **public IP** (`13.140.171.246:8000`), which is deliberately not internet-exposed (tunnel-only
+      by design, per the go-live TLS item below). Every call failed at the network layer before it
+      ever reached the API — no CORS, no auth, no server-side signal at all, just a caught
+      `fetch()` rejection surfaced as "API error".
+    - **Fix:** `background.js` `API_BASE`, `popup.js` `DASHBOARD`, and `manifest.json`
+      `host_permissions` all switched from `http://13.140.171.246:8000` to `http://localhost:8000`
+      (matches `ssh -L 8000:localhost:8000` tunnel access). `popup.js`'s user-facing error string
+      updated to match. `main.py` untouched.
+    - **Not yet done:** not live-verified in an actual browser this round (no browser available in
+      this session) — next session picking up the extension should confirm with the SSH tunnel up
+      and the unpacked extension reloaded in `chrome://extensions`. Not committed/pushed yet (per
+      read-only-until-go norm this session started under; awaiting explicit commit instruction).
+21. **§4C.1 add-to-scoring (Amazon page → candidate) built.** Mirror image of §4C.2's paste-back
+    pattern, not a new design: an Amazon product page gives `amazon_cost` but no observed eBay
+    `sale_price`, so `POST /candidates` now accepts `sale_price` as optional. Omitting it stores
+    the candidate as `awaiting_sale_price` (new boolean column + migration, `models.py`/
+    `database.py`) with `sale_price` held at a `0.0` placeholder — same non-null-placeholder
+    reasoning as `awaiting_amazon_cost`, and the margin gate does **not** run against it.
+    - **`services/ebay_search.py`** (new) — pure string builder, no network/HTTP-client import
+      (structurally enforced, mirrors `amazon_search.py`), reuses `clean_title_for_search`. Builds
+      an eBay **sold + completed** listings search URL (`LH_Sold=1&LH_Complete=1`) so the human
+      paste-back source is real recent sale prices, not asking prices. Exposed on every candidate
+      response as `ebay_search_url`.
+    - **`routers/candidates.py`** — `awaiting_sale_price` added to `NOT_APPROVABLE_STATUSES`;
+      `reevaluate` gained a `sale_price > 0` guard (400) mirroring the existing `amazon_cost > 0`
+      guard, and clears `awaiting_sale_price` when a real price is saved. A reevaluate call that
+      only updates `amazon_cost` while `awaiting_sale_price` is still true short-circuits before
+      the margin gate (can't gate on the `0.0` placeholder) — mirrors the `awaiting_amazon_cost`
+      short-circuit path added in item 19.
+    - **`candidates.html`** — `awaiting_sale_price` status filter + blue badge/row tint (distinct
+      color from `awaiting_amazon_cost`'s amber, so the two pending-states are visually
+      distinguishable at a glance). Awaiting rows render a paste-back block: **"Find on eBay →"**
+      link (new tab, sold/completed search) + title/cost context + sale-price input + Save,
+      calling the same `reevaluate` endpoint as §4C.2.
+    - **`ecom-sniffer/content_amazon.js`** — new "Add to Scoring" button on the Amazon page
+      overlay, wired independently of (and before) the existing `/margin/calculate` quick-check
+      call so it still works if that call fails. Posts `{source: 'manual_amazon', amazon_cost,
+      asin, title}` with no `sale_price` — the API stores it `awaiting_sale_price` for a human to
+      paste-back later from the dashboard.
+    - **11 new tests** (162 total, up from 151): `tests/test_ebay_search.py` (7 — no-network-call
+      proof, UPC-vs-title preference, sold/completed filter present, noise-stripping fallback,
+      empty/all-noise title never blank) + `tests/test_candidates.py` (4 — `ebay_search_url`
+      exposure, intake-without-sale_price flags `awaiting_sale_price` not margin-failed and blocks
+      approve until a real price clears it, amazon_cost-only reevaluate leaves the awaiting flag
+      untouched and doesn't run the gate, non-positive sale_price rejected with 400 without
+      mutating the awaiting state).
+    - **Not yet done:** not live-verified in an actual browser this session (no browser available)
+      — next session should confirm the "Add to Scoring" button end-to-end on a real Amazon page
+      with the SSH tunnel up, then paste-back a real eBay price from the dashboard. Not
+      committed/pushed yet (same read-only-until-go norm as item 20).
 
 **Still open:** fulfillment bot is repointed (venv + unit, see Phase 4b) but intentionally left
 **disabled** — enabling/starting it, and the Telegram approver setup, are separate future sessions.
@@ -830,9 +890,11 @@ None of these block the sandbox cutover; all matter before autonomous real purch
       failure and writes non-atomically. A torn write wipes `spend` → `DAILY_SPEND_CAP` forgets
       today's total, defeating the hard cap. Fix: write-temp-then-rename; don't zero `spend` on
       parse error.
-- [ ] **TLS.** Extension talks to `http://13.140.171.246:8000` in cleartext — the `X-API-Key` that
-      authorizes real purchases travels in the clear. Put Caddy/HTTPS in front; bind uvicorn to
-      127.0.0.1 behind it.
+- [ ] **TLS.** As of item 20 (2026-07-12) the extension now talks to `http://localhost:8000` over
+      the operator's own SSH tunnel, not the public IP in cleartext over the internet — the
+      immediate key-interception risk this item was written for is mitigated for solo-operator use.
+      Still relevant if the API is ever re-exposed on the public IP (e.g. for a non-tunnel client):
+      put Caddy/HTTPS in front; bind uvicorn to 127.0.0.1 behind it.
 - [ ] **Real cap values.** Set `ABSOLUTE_MAX_ORDER` / `DAILY_SPEND_CAP` to true order sizes (not the
       150/500 placeholders).
 - [ ] **Live account readiness.** Real payment card on the Amazon account; known last blocker.
