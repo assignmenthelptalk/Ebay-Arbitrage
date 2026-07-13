@@ -1,4 +1,4 @@
-﻿const DASHBOARD = 'http://13.140.171.246:8000/dashboard';
+﻿const DASHBOARD = 'http://localhost:8000/dashboard';
 
 function api(method, path, body) {
   return new Promise((resolve) => {
@@ -71,7 +71,7 @@ async function load() {
   }
 
   if (anyError) {
-    showError('Could not reach API at 13.140.171.246:8000 — check the server is running.');
+    showError('Could not reach API at localhost:8000 — check the SSH tunnel is running.');
   }
 }
 

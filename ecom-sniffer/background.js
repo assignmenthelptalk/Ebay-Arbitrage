@@ -1,4 +1,4 @@
-﻿const API_BASE = 'http://13.140.171.246:8000';
+﻿const API_BASE = 'http://localhost:8000';
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type !== 'API_REQUEST') return false;
