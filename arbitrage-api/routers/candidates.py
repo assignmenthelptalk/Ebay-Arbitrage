@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Candidate, GeneratedListing, MarginCalc, Score
-from services import amazon_search, margin_engine
+from services import amazon_search, ebay_search, margin_engine
 from services.event_logger import log_event
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
@@ -18,8 +18,12 @@ VALID_SOURCES = {"zik", "browse_auto", "manual_amazon", "manual_csv", "manual_fo
 
 class IntakeRequest(BaseModel):
     source: str
-    sale_price: float
     amazon_cost: float
+    # §4C.1: an Amazon product page has amazon_cost but no observed eBay
+    # sale_price. Omitting it (rather than requiring a guess) stores the
+    # candidate as awaiting_sale_price instead of running the margin gate —
+    # the mirror of awaiting_amazon_cost (see models.py).
+    sale_price: Optional[float] = None
     asin: Optional[str] = None
     title: Optional[str] = None
 
@@ -39,7 +43,13 @@ class RejectRequest(BaseModel):
     reason: Optional[str] = None
 
 
-NOT_APPROVABLE_STATUSES = {"rejected", "rejected_margin", "scoring_failed", "awaiting_amazon_cost"}
+NOT_APPROVABLE_STATUSES = {
+    "rejected",
+    "rejected_margin",
+    "scoring_failed",
+    "awaiting_amazon_cost",
+    "awaiting_sale_price",
+}
 
 # Real Amazon ASINs are exactly 10 alphanumeric characters. This is a sanity
 # check only, not a validator — a human just matched the product by hand
@@ -120,7 +130,9 @@ def _candidate_to_dict(
         "amazon_cost": c.amazon_cost,
         "status": c.status,
         "awaiting_amazon_cost": c.awaiting_amazon_cost,
+        "awaiting_sale_price": c.awaiting_sale_price,
         "amazon_search_url": amazon_search.build_amazon_search_url(c.title) if c.title else None,
+        "ebay_search_url": ebay_search.build_ebay_search_url(c.title) if c.title else None,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "margin": _margin_calc_to_dict(latest_margin) if latest_margin else None,
@@ -209,19 +221,28 @@ def intake_candidate(payload: IntakeRequest, db: Session = Depends(get_db)):
             detail={"error": True, "message": f"source must be one of {sorted(VALID_SOURCES)}", "code": 400},
         )
 
+    awaiting = payload.sale_price is None
+
     candidate = Candidate(
         source=payload.source,
         asin=payload.asin,
         title=payload.title,
-        sale_price=payload.sale_price,
+        # Placeholder, not a real price — sale_price stays NOT NULL by design
+        # (see models.py). awaiting_sale_price is what actually marks this as
+        # pending, so it's never mistaken for a real $0 price or a margin-gate
+        # failure.
+        sale_price=payload.sale_price if payload.sale_price is not None else 0.0,
         amazon_cost=payload.amazon_cost,
-        status="pending_review",
+        status="awaiting_sale_price" if awaiting else "pending_review",
+        awaiting_sale_price=awaiting,
     )
     db.add(candidate)
     db.commit()
     db.refresh(candidate)
 
-    margin_calc = _run_margin_and_store(db, candidate, payload.sale_price, payload.amazon_cost)
+    margin_calc = None
+    if not awaiting:
+        margin_calc = _run_margin_and_store(db, candidate, payload.sale_price, payload.amazon_cost)
 
     return _candidate_to_dict(candidate, margin_calc)
 
@@ -285,9 +306,20 @@ def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Sess
             detail={"error": True, "message": "amazon_cost must be greater than 0", "code": 400},
         )
 
+    if payload.sale_price is not None and payload.sale_price <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": True, "message": "sale_price must be greater than 0", "code": 400},
+        )
+
     candidate.amazon_cost = payload.amazon_cost
     if payload.sale_price is not None:
         candidate.sale_price = payload.sale_price
+        # A real price has now been entered — this is how an
+        # awaiting_sale_price candidate (§4C.1, an Amazon-sourced candidate
+        # with no observed eBay price yet) becomes a normal margin-gated one.
+        # Mirror of awaiting_amazon_cost clearing below.
+        candidate.awaiting_sale_price = False
 
     if payload.asin is not None:
         asin = payload.asin.strip()
@@ -303,6 +335,17 @@ def reevaluate_candidate(candidate_id: int, payload: ReevaluateRequest, db: Sess
     # candidate (from a promoted competitor listing with no cost yet, see
     # routers/competitors.py) becomes a normal margin-gated candidate.
     candidate.awaiting_amazon_cost = False
+
+    if candidate.awaiting_sale_price:
+        # Still missing a real sale_price (this call only updated
+        # amazon_cost/asin) — nothing to gate on yet, don't run
+        # margin_engine against the 0.0 placeholder.
+        candidate.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(candidate)
+        return _candidate_to_dict(
+            candidate, _latest_margin(db, candidate_id), _latest_score(db, candidate_id), _latest_listing(db, candidate_id)
+        )
 
     margin_calc = _run_margin_and_store(db, candidate, candidate.sale_price, candidate.amazon_cost)
 

@@ -92,6 +92,13 @@
         }
         .btn-list:hover:not(:disabled) { background:#2ea043; }
         .btn-list:disabled { background:#21262d;color:#484f58;cursor:default; }
+        .btn-score {
+          margin-top:8px;width:100%;padding:7px 0;
+          background:#1f6feb;color:#fff;border:none;border-radius:6px;
+          font-size:12px;font-weight:600;cursor:pointer;
+        }
+        .btn-score:hover:not(:disabled) { background:#388bfd; }
+        .btn-score:disabled { background:#21262d;color:#484f58;cursor:default; }
         .close {
           margin-left:auto;background:none;border:none;
           color:#8b949e;cursor:pointer;font-size:14px;padding:0;line-height:1;
@@ -110,6 +117,7 @@
         <div class="row"><span>Target profit</span><span id="v-profit">—</span></div>
         <div class="row"><span>Viable</span><span id="v-viable">checking…</span></div>
         <button class="btn-list" id="list-btn" disabled>List on eBay</button>
+        <button class="btn-score" id="score-btn">Add to Scoring</button>
         <div class="msg" id="msg"></div>
       </div>
     `;
@@ -133,6 +141,36 @@
     const shadow = buildBadge();
 
     shadow.getElementById('v-price').textContent = '$' + price.toFixed(2);
+
+    // §4C.1: routes through the candidates pipeline (margin gate + AI score +
+    // human review), independent of the /margin/calculate quick-check below —
+    // wired first and unconditionally so it still works even if that call
+    // fails. No sale_price available on an Amazon page; the API stores the
+    // candidate as awaiting_sale_price and a human pastes a real eBay price
+    // back later from the review dashboard.
+    const scoreBtn = shadow.getElementById('score-btn');
+    scoreBtn.addEventListener('click', async () => {
+      scoreBtn.disabled = true;
+      scoreBtn.textContent = 'Adding…';
+
+      const scoreRes = await apiRequest('POST', '/candidates', {
+        source: 'manual_amazon',
+        amazon_cost: price,
+        asin,
+        title: extractTitle(),
+      });
+
+      if (scoreRes?.ok) {
+        scoreBtn.textContent = 'Added ✓';
+        shadow.getElementById('msg').textContent =
+          'Candidate #' + (scoreRes.data.id ?? '?') + ' — ' + (scoreRes.data.status ?? 'saved');
+      } else {
+        scoreBtn.disabled = false;
+        scoreBtn.textContent = 'Retry';
+        shadow.getElementById('msg').textContent =
+          scoreRes?.data?.detail?.message || scoreRes?.error || 'Add to scoring failed';
+      }
+    });
 
     const res = await apiRequest('POST', '/margin/calculate', { amazon_price: price });
 

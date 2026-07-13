@@ -297,6 +297,98 @@ def test_candidate_response_includes_amazon_search_url(client):
     assert "Brand" not in data["amazon_search_url"]
 
 
+def test_candidate_response_includes_ebay_search_url(client):
+    resp = client.post(
+        "/candidates",
+        json={
+            "source": "manual_amazon",
+            "amazon_cost": 20.0,
+            "title": "Brand New Sealed Apple iPhone 7 32GB Free Shipping",
+        },
+        headers=HEADERS,
+    )
+    data = resp.json()
+    assert data["ebay_search_url"].startswith("https://www.ebay.com/sch/i.html?_nkw=")
+    assert "iPhone" in data["ebay_search_url"]
+    assert "Brand" not in data["ebay_search_url"]
+
+
+def test_intake_without_sale_price_flags_awaiting_not_margin_failed(client):
+    resp = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "amazon_cost": 20.0, "title": "Unpriced Widget"},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "awaiting_sale_price"
+    assert data["awaiting_sale_price"] is True
+    assert data["status"] != "rejected_margin"
+    assert data["margin"] is None  # margin gate must not have run at all
+
+    # Cannot approve while awaiting a real sale price.
+    approve_resp = client.post(f"/candidates/{data['id']}/approve", headers=HEADERS)
+    assert approve_resp.status_code == 409
+
+    # Entering a real sale price via reevaluate clears the flag and runs the gate.
+    reeval_resp = client.post(
+        f"/candidates/{data['id']}/reevaluate", json={"amazon_cost": 20.0, "sale_price": 50.0}, headers=HEADERS
+    )
+    assert reeval_resp.status_code == 200
+    reeval_data = reeval_resp.json()
+    assert reeval_data["margin"] is not None
+    assert reeval_data["status"] != "awaiting_sale_price"
+    assert reeval_data["awaiting_sale_price"] is False
+
+
+def test_reevaluate_amazon_cost_only_leaves_awaiting_sale_price_untouched(client):
+    # Mirrors the pattern where a promote/pasteback call only updates one
+    # side of the pair (see reevaluate_omitting_asin_key_preserves_existing_asin)
+    # — updating amazon_cost alone must not run the margin gate against the
+    # 0.0 sale_price placeholder.
+    resp = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "amazon_cost": 20.0, "title": "Still Unpriced Widget"},
+        headers=HEADERS,
+    ).json()
+
+    reeval_resp = client.post(
+        f"/candidates/{resp['id']}/reevaluate", json={"amazon_cost": 25.0}, headers=HEADERS
+    )
+    assert reeval_resp.status_code == 200
+    data = reeval_resp.json()
+    assert data["awaiting_sale_price"] is True
+    assert data["status"] == "awaiting_sale_price"
+    assert data["margin"] is None
+    assert data["amazon_cost"] == 25.0
+
+
+def test_reevaluate_rejects_non_positive_sale_price(client):
+    created = client.post(
+        "/candidates",
+        json={"source": "manual_amazon", "amazon_cost": 20.0, "title": "Unpriced Widget"},
+        headers=HEADERS,
+    ).json()
+
+    zero = client.post(
+        f"/candidates/{created['id']}/reevaluate",
+        json={"amazon_cost": 20.0, "sale_price": 0},
+        headers=HEADERS,
+    )
+    assert zero.status_code == 400
+
+    negative = client.post(
+        f"/candidates/{created['id']}/reevaluate",
+        json={"amazon_cost": 20.0, "sale_price": -5},
+        headers=HEADERS,
+    )
+    assert negative.status_code == 400
+
+    # rejected attempts must not have touched the candidate's awaiting state.
+    detail = client.get(f"/candidates/{created['id']}", headers=HEADERS).json()
+    assert detail["awaiting_sale_price"] is True
+
+
 def test_reevaluate_rejects_non_positive_cost(client):
     created = client.post(
         "/candidates",

@@ -75,6 +75,7 @@ tbody tr:last-child { border-bottom: none; }
 tbody tr.st-approved { background: rgba(63,185,80,.05); }
 tbody tr.st-rejected, tbody tr.st-rejected_margin { background: rgba(248,81,73,.04); }
 tbody tr.st-awaiting_amazon_cost { background: rgba(210,153,34,.07); }
+tbody tr.st-awaiting_sale_price { background: rgba(88,166,255,.06); }
 tbody tr:hover { background: rgba(255,255,255,0.03); }
 td { padding: 9px 12px; }
 .mono { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; color: var(--muted); }
@@ -87,6 +88,7 @@ td { padding: 9px 12px; }
 .b-scored          { background: rgba(188,140,255,.15); color: #bc8cff; }
 .b-scoring_failed  { background: rgba(210,153,34,.15);  color: #d29922; }
 .b-awaiting_amazon_cost { background: rgba(210,153,34,.15); color: #d29922; }
+.b-awaiting_sale_price { background: rgba(88,166,255,.15); color: #58a6ff; }
 .b-approved        { background: rgba(63,185,80,.15);   color: #3fb950; }
 .b-rejected        { background: rgba(248,81,73,.15);   color: #f85149; }
 .b-rejected_margin { background: rgba(248,81,73,.12);   color: #f85149; }
@@ -198,6 +200,7 @@ a.asin-link:hover { text-decoration: underline; }
       <option value="pending_review">pending_review</option>
       <option value="scored">scored</option>
       <option value="awaiting_amazon_cost">awaiting_amazon_cost</option>
+      <option value="awaiting_sale_price">awaiting_sale_price</option>
       <option value="approved">approved</option>
       <option value="rejected">rejected</option>
       <option value="rejected_margin">rejected_margin</option>
@@ -277,7 +280,7 @@ function mgClass(pct) {
 
 function badge(status) {
   const s = String(status ?? 'unknown').toLowerCase();
-  const known = new Set(['pending_review','scored','approved','rejected','rejected_margin','scoring_failed','awaiting_amazon_cost']);
+  const known = new Set(['pending_review','scored','approved','rejected','rejected_margin','scoring_failed','awaiting_amazon_cost','awaiting_sale_price']);
   const cls = known.has(s) ? s : 'unknown';
   return `<span class="badge b-${cls}">${esc(status ?? 'unknown')}</span>`;
 }
@@ -384,7 +387,7 @@ function renderListingCell(c) {
 // awaiting_amazon_cost has no real margin yet (amazon_cost is a 0.0
 // placeholder, see routers/competitors.py promote_listing), so approving it
 // would lock in a fabricated margin. Keep this set in sync with the backend.
-const NOT_APPROVABLE = new Set(['rejected', 'rejected_margin', 'scoring_failed', 'awaiting_amazon_cost']);
+const NOT_APPROVABLE = new Set(['rejected', 'rejected_margin', 'scoring_failed', 'awaiting_amazon_cost', 'awaiting_sale_price']);
 
 function renderActions(c) {
   const asinLink = c.asin
@@ -401,6 +404,21 @@ function renderActions(c) {
         <input type="text" class="pasteback-asin" placeholder="ASIN" maxlength="20">
         <input type="number" step="0.01" min="0.01" class="pasteback-cost" placeholder="cost">
         <button class="btn btn-green act-pasteback">Save</button>
+      </div>
+      <div class="btn-row"><button class="btn btn-red act-reject">Reject</button></div>
+      <div class="row-msg"></div>
+    </div>`;
+  }
+
+  if (c.awaiting_sale_price) {
+    const title = c.title || '(untitled)';
+    const findHref = c.ebay_search_url || 'https://www.ebay.com/sch/i.html';
+    return `<div class="row-actions pasteback" data-id="${c.id}">
+      <a class="btn btn-blue" href="${esc(findHref)}" target="_blank" rel="noopener">Find on eBay →</a>
+      <div class="pasteback-context">${esc(title.length > 40 ? title.slice(0,40)+'…' : title)} · <span class="pb-price">${money(c.amazon_cost)} cost</span></div>
+      <div class="pasteback-row">
+        <input type="number" step="0.01" min="0.01" class="pasteback-price" placeholder="eBay sale price">
+        <button class="btn btn-green act-pasteback-price">Save</button>
       </div>
       <div class="btn-row"><button class="btn btn-red act-reject">Reject</button></div>
       <div class="row-msg"></div>
@@ -498,6 +516,25 @@ function renderRow(c) {
         const body = { amazon_cost: cost };
         if (asin) body.asin = asin;
         await apiSend(`/candidates/${c.id}/reevaluate`, body);
+        setMsg('Saved — margin gate ran.', 'ok');
+        setTimeout(load, 600);
+      } catch (e) { setMsg(e.message, 'err'); lockRow(false); }
+    };
+  }
+
+  // §4C.1 mirror: human opened "Find on eBay", found a comparable sold
+  // listing, and pastes the observed price back here. amazon_cost is
+  // already known from the manual_amazon intake — resubmitted unchanged
+  // since /reevaluate always requires it.
+  const pastebackPriceBtn = tr.querySelector('.act-pasteback-price');
+  if (pastebackPriceBtn) {
+    pastebackPriceBtn.onclick = async () => {
+      const priceInput = tr.querySelector('.pasteback-price');
+      const price = Number(priceInput.value);
+      if (!(price > 0)) { setMsg('Enter a valid sale price.', 'err'); return; }
+      lockRow(true);
+      try {
+        await apiSend(`/candidates/${c.id}/reevaluate`, { amazon_cost: c.amazon_cost, sale_price: price });
         setMsg('Saved — margin gate ran.', 'ok');
         setTimeout(load, 600);
       } catch (e) { setMsg(e.message, 'err'); lockRow(false); }

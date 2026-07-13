@@ -187,6 +187,12 @@ class Candidate(Base):
     # actually marks the candidate as pending cost entry, not margin-failed.
     awaiting_amazon_cost = Column(Boolean, default=False, nullable=False)
 
+    # §4C.1: the mirror image of awaiting_amazon_cost. An Amazon product page
+    # gives amazon_cost but has no eBay sale_price to gate margin on — same
+    # placeholder pattern (sale_price stays NOT NULL, stored as 0.0) so a
+    # human can paste back a real observed eBay price via reevaluate.
+    awaiting_sale_price = Column(Boolean, default=False, nullable=False)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

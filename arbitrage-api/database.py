@@ -51,6 +51,8 @@ def _migrate(engine):
         # §4A.7 two-phase scan refinement — cheap scan, enrich-on-select.
         "ALTER TABLE competitor_listings ADD COLUMN same_seller_listing_count INTEGER",
         "ALTER TABLE competitor_listings ADD COLUMN enriched_at DATETIME",
+        # §4C.1 — mirror of awaiting_amazon_cost, see models.py.
+        "ALTER TABLE candidates ADD COLUMN awaiting_sale_price BOOLEAN DEFAULT 0",
     ]
     with engine.connect() as conn:
         for sql in migrations:
