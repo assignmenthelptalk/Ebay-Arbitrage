@@ -490,13 +490,25 @@ function startCountdown() {
 }
 
 async function doScan(btn) {
+  const seller = prompt('Enter eBay seller username to scan:');
+  if (!seller || !seller.trim()) return;
+
+  const query = prompt(
+    "What kind of product are you sourcing from this seller? (eBay's Browse API requires a keyword — a blank/too-generic search is rejected)"
+  );
+  if (!query || !query.trim()) return;
+
   const box = document.getElementById('result-box');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Scanning…';
   box.className = 'result-box show';
   box.textContent = 'POST /competitors/scan …';
   try {
-    const d = await apiFetch('/competitors/scan', { method: 'POST' });
+    const d = await apiFetch('/competitors/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seller_username: seller.trim(), query: query.trim() }),
+    });
     box.textContent = JSON.stringify(d, null, 2);
   } catch (e) {
     box.textContent = 'Error: ' + e.message;

@@ -99,13 +99,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const seller = prompt('Enter eBay seller username to scan:');
     if (!seller || !seller.trim()) return;
 
+    const query = prompt(
+      "What kind of product are you sourcing from this seller? (eBay's Browse API requires a keyword — a blank/too-generic search is rejected)"
+    );
+    if (!query || !query.trim()) return;
+
     const btn = document.getElementById('btn-scan');
     btn.disabled = true;
     btn.textContent = 'Scanning…';
 
     const res = await api('POST', '/competitors/scan', {
-      seller_usernames: [seller.trim()],
-      marketplace: 'EBAY_GB',
+      seller_username: seller.trim(),
+      query: query.trim(),
     });
 
     btn.disabled = false;
